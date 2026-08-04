@@ -1,7 +1,9 @@
-# Real thinking budget. At 1024 tokens every MATH trace was truncated mid-
-# <think>, so the verifier outcome was a length statistic rather than a
-# reasoning verdict. Median Qwen3 math trace is ~7k tokens, p95 ~18.5k.
-max_new_tokens: 18000
+# Full no-truncation budget. Qwen3-1.7B/4B have a 32,768-token context and
+# math prompts stay under ~2k tokens, so 30,000 new tokens uses the whole
+# window. The measured trace tail is ~18.5k at p95, which leaves a wide margin;
+# a rollout that still hits this cap is marked `truncated` and never trained
+# on, but at this budget that should be a rare pathology, not a policy.
+max_new_tokens: 30000
 do_sample: true
 temperature: 0.6
 top_p: 0.95

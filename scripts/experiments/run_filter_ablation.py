@@ -49,7 +49,9 @@ class AblationOptions:
     select_budget: int = 16
     eval_problems: int = 200
     eval_samples: int = 4
-    max_new_tokens: int = 18000
+    #: Full context budget so reasoning traces are never truncated; a rollout
+    #: that still hits the cap is marked `truncated` and cannot be trained on.
+    max_new_tokens: int = 30000
     seed: int = 0
     #: Fixed across arms and phases so learning-curve points are comparable.
     eval_seed: int = 1234
@@ -75,7 +77,7 @@ def _parse_args(argv: list[str] | None = None) -> AblationOptions:
     )
     parser.add_argument("--eval-problems", type=int, default=200)
     parser.add_argument("--eval-samples", type=int, default=4)
-    parser.add_argument("--max-new-tokens", type=int, default=18000)
+    parser.add_argument("--max-new-tokens", type=int, default=30000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset-preset", default="openr1")
     parser.add_argument("--student-model", default=None)

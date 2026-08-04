@@ -78,12 +78,12 @@ gradient is exactly zero. Both remain available through `sampled_diagnostics`
 for logging and for comparison against veRL, and `OPDLossConfig` refuses to
 train on either.
 
-At a real thinking-trace length the naive computation does not fit. An
-18k-token sequence costs about 5.1 GiB of bf16 logits per model and 10.2 GiB per
-fp32 `log_softmax`, so over 30 GiB before weights or activations. The loss is
+At a real thinking-trace length the naive computation does not fit. A
+30k-token sequence costs about 8.5 GiB of bf16 logits per model and 17 GiB per
+fp32 `log_softmax`, so over 50 GiB before weights or activations. The loss is
 therefore chunked along the time axis, with each chunk's softmax recomputed
-during backward. Measured on an H100: 13.9 GiB drops to 5.8 GiB at 4k tokens,
-and 16k fits in 23 GiB.
+during backward. Measured on a 24GB card: 13.9 GiB drops to 5.8 GiB at 4k
+tokens, and 16k fits in 23 GiB.
 
 ### Parameters are kept in fp32
 
@@ -161,10 +161,18 @@ tests/
 
 Hydra composes the run from `configs/config.yaml`. The groups that matter most:
 
-`precision/h100` sets the micro-batch caps, the loss chunk size, and fp32 master
-weights. `generation/qwen3_thinking` sets an 18k-token budget, which the trace
-profiler suggests is roughly the p95 of a Qwen3 math trace. `filtering/` selects
-the arm. `estimator/exact_reverse_kl` selects the loss.
+`precision/a100_4x80gb` (the default) and `precision/h100` set the micro-batch
+caps, the loss chunk size, and fp32 master weights. `generation/qwen3_thinking`
+sets a 30k-token budget: the models have a 32,768-token context and math
+prompts are short, so the budget uses the whole window and reasoning traces
+are not truncated in practice. The trace profiler puts the p95 trace near
+18.5k tokens, so the cap sits far above the tail; anything that still hits it
+is marked `truncated` and excluded. `filtering/` selects the arm.
+`estimator/exact_reverse_kl` selects the loss.
+
+To serve generation through vLLM on a multi-GPU node, see `docs/verl.md`,
+which maps this experiment onto verl's on-policy distillation support and
+explains which of verl's KL estimator settings are safe to use.
 
 Config parsing raises on unknown keys. A misspelled option fails at startup
 rather than being silently dropped and leaving a default in charge.

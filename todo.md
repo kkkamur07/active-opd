@@ -39,6 +39,9 @@ built yet, and building it is deliberately blocked on the first item below.
 
 - Serve generation from vLLM, refreshed once per round. Generation is around 87
   percent of wall clock, so this is the largest single speedup available.
+  `docs/verl.md` maps the experiment onto verl's OPD support for a 4x A100
+  node, including which of verl's KL estimator settings avoid the k3 gradient
+  problem and how to keep the selection step and fairness checks.
 - Fuse the LM head into the loss (Liger or cut-cross-entropy) so full-vocabulary
   logits are never materialized. Chunking bounds the softmax memory but the
   logit tensors themselves remain, at roughly 9 GiB for both models at 16k

@@ -1,7 +1,7 @@
 defaults:
   - model/student: qwen3_1_7b
   - model/teacher: qwen3_4b
-  - precision: h100
+  - precision: a100_4x80gb
   - thinking: qwen3
   - generation: qwen3_thinking
   - rollout: default
