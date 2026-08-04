@@ -1,0 +1,41 @@
+"""OPD loss estimators and response-mask helpers."""
+
+from .opd import (
+    DIAGNOSTIC_ESTIMATORS,
+    TRAINABLE_ESTIMATORS,
+    EstimatorName,
+    OPDLossConfig,
+    build_response_mask,
+    compute_kl,
+    compute_opd_loss,
+    compute_policy_gradient_opd_loss,
+    masked_mean,
+    opd_loss,
+    opd_loss_terms,
+    per_token_divergence,
+    resolve_estimator,
+    response_start_from_lengths,
+    response_token_mask,
+    reverse_kl_estimator,
+    sampled_diagnostics,
+)
+
+__all__ = [
+    "DIAGNOSTIC_ESTIMATORS",
+    "TRAINABLE_ESTIMATORS",
+    "EstimatorName",
+    "OPDLossConfig",
+    "build_response_mask",
+    "compute_kl",
+    "compute_opd_loss",
+    "compute_policy_gradient_opd_loss",
+    "masked_mean",
+    "opd_loss",
+    "opd_loss_terms",
+    "per_token_divergence",
+    "resolve_estimator",
+    "response_start_from_lengths",
+    "response_token_mask",
+    "reverse_kl_estimator",
+    "sampled_diagnostics",
+]

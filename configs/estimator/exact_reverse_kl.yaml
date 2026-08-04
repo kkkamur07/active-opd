@@ -1,0 +1,10 @@
+# Exact per-token KL(student || teacher) over the full vocabulary.
+# The old sampled-k3 default backpropagated the FORWARD KL gradient; k1/k3 are
+# now logged diagnostics and are refused as training objectives.
+name: exact_reverse_kl
+estimator: exact_reverse_kl
+direction: student_to_teacher
+chunk_size: ${precision.loss_chunk_size}
+clamp_log_ratio: 10.0
+top_k: 32
+reduction: mean

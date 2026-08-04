@@ -1,0 +1,22 @@
+defaults:
+  - model/student: qwen3_1_7b
+  - model/teacher: qwen3_4b
+  - precision: h100
+  - thinking: qwen3
+  - generation: qwen3_thinking
+  - rollout: default
+  - filtering: verified_wrong
+  - estimator: exact_reverse_kl
+  - optimizer: adamw
+  - trainer: default
+  - data: openr1_math
+  - evaluation: math500
+  - seed: default
+  - paths: default
+  - _self_
+
+experiment_name: active-opd-qwen3
+# Every run gets its own directory. Runs previously shared one output dir, so
+# metrics.jsonl accumulated several invocations into one unseparable curve
+# while results.json was overwritten.
+run_name: ${now:%Y%m%d-%H%M%S}

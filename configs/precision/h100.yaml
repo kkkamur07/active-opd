@@ -1,0 +1,14 @@
+# Single H100 80GB. Long thinking traces make the loss, not the weights, the
+# binding memory constraint: an 18k-token sequence is ~5.1 GiB of bf16 logits
+# per model and ~10.2 GiB per fp32 log_softmax, so the loss is chunked.
+compute_dtype: bfloat16
+allow_tf32: true
+micro_batch_size: 2
+max_micro_batch_tokens: 36000   # batch * padded_length cap
+gradient_accumulation_steps: 8
+max_grad_norm: 1.0
+activation_checkpointing: true
+# fp32 master weights: bf16 storage rounds an lr=1e-5 Adam step to a no-op for
+# ~85-90% of parameters. Compute still runs in bf16 under autocast.
+master_weights: fp32
+loss_chunk_size: 1024

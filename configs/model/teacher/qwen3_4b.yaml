@@ -1,0 +1,17 @@
+model_id: Qwen/Qwen3-4B
+revision: null
+dtype: bfloat16
+quantization: 4bit
+device_map: auto
+max_memory:
+  "cuda:0": 22GiB
+  cpu: 32GiB
+low_cpu_mem_usage: true
+trust_remote_code: false
+attn_implementation: sdpa
+gradient_checkpointing: false
+optimizer_8bit: false
+use_cache: true
+bnb_4bit_compute_dtype: bfloat16
+bnb_4bit_quant_type: nf4
+bnb_4bit_use_double_quant: true

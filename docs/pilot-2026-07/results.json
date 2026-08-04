@@ -1,0 +1,177 @@
+{
+  "status": "ok",
+  "models": {
+    "student": "Qwen/Qwen3-1.7B",
+    "teacher": "Qwen/Qwen3-4B",
+    "teacher_quantization": "4bit"
+  },
+  "dataset": {
+    "name": "HuggingFaceH4/MATH-500",
+    "split": "test",
+    "sample_size": 1,
+    "references": [
+      "\\left( 3, \\frac{\\pi}{2} \\right)"
+    ]
+  },
+  "pilot_limits": {
+    "reason": "Pilot bound: 1 MATH-500 problem and 1024 generated tokens per rollout; this is the configured full generation budget for a one-prompt corrected comparison.",
+    "k": 8,
+    "max_new_tokens": 1024
+  },
+  "baselines": {
+    "standard": {
+      "status": "ok",
+      "baseline": "standard",
+      "seed": 42,
+      "sample_size": 1,
+      "k": 8,
+      "max_new_tokens": 1024,
+      "generation_overrides": {
+        "enable_thinking": true,
+        "do_sample": true
+      },
+      "wall_seconds": 26.452457895036787,
+      "generation_seconds": 17.691647151950747,
+      "training_seconds": 2.615688961930573,
+      "generation_steps": 8192,
+      "training_steps": 8,
+      "optimizer_steps": 8,
+      "losses": [
+        0.24803343415260315,
+        0.18587453663349152,
+        0.20646768808364868,
+        0.16556312143802643,
+        0.2509441077709198,
+        0.7008578777313232,
+        0.20234006643295288,
+        0.20298564434051514
+      ],
+      "last_loss": 0.20298564434051514,
+      "generated_rollouts": 8,
+      "retained_rollouts": 8,
+      "retained_rollout_rate": 1.0,
+      "verifier_outcomes": {
+        "malformed": 5,
+        "wrong": 2,
+        "correct": 1,
+        "skipped": 0
+      },
+      "correct_problems": 1,
+      "accuracy": 1.0,
+      "responses_sha256": "429ee9d9f9370a97a50e1c1f958baece86576447cdd18acba04eed40b65425be",
+      "response_previews": [
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Let me remember how to do this. \n\nFirst, I recall that in polar coordinates, a point is represented as (r, \u03b8), where r is the distance from the orig",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me remember how to do this. Polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me remember how to do this. Polar coordinates are given as (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given as (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given as (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Let me recall how to do this. From what I remember, polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f"
+      ],
+      "raw_trace_path": "outputs/actual-model-benchmark/raw/standard.jsonl",
+      "placement": {
+        "student_devices": [
+          "cuda:0"
+        ],
+        "teacher_devices": [
+          "cuda:0"
+        ],
+        "teacher_device_map": null,
+        "amp_enabled": true,
+        "amp_dtype": "bfloat16",
+        "amp_device_type": "cuda"
+      },
+      "telemetry_before": {
+        "memory": {
+          "allocated": 6121996288,
+          "reserved": 6184501248,
+          "max_allocated": 6121996288
+        },
+        "nvidia_smi": "0, NVIDIA GeForce RTX 4090, 6351, 24564, 0"
+      },
+      "telemetry_after": {
+        "memory": {
+          "allocated": 13025390592,
+          "reserved": 21692940288,
+          "max_allocated": 20755092992
+        },
+        "nvidia_smi": "0, NVIDIA GeForce RTX 4090, 21167, 24564, 100"
+      }
+    },
+    "active": {
+      "status": "ok",
+      "baseline": "active",
+      "seed": 42,
+      "sample_size": 1,
+      "k": 8,
+      "max_new_tokens": 1024,
+      "generation_overrides": {
+        "enable_thinking": true,
+        "do_sample": true
+      },
+      "wall_seconds": 22.406362559180707,
+      "generation_seconds": 17.40814404701814,
+      "training_seconds": 0.6501857116818428,
+      "generation_steps": 8192,
+      "training_steps": 2,
+      "optimizer_steps": 2,
+      "losses": [
+        0.17663541436195374,
+        0.21605589985847473
+      ],
+      "last_loss": 0.21605589985847473,
+      "generated_rollouts": 8,
+      "retained_rollouts": 2,
+      "retained_rollout_rate": 0.25,
+      "verifier_outcomes": {
+        "malformed": 5,
+        "wrong": 2,
+        "correct": 1,
+        "skipped": 0
+      },
+      "correct_problems": 1,
+      "accuracy": 1.0,
+      "responses_sha256": "429ee9d9f9370a97a50e1c1f958baece86576447cdd18acba04eed40b65425be",
+      "response_previews": [
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Let me remember how to do this. \n\nFirst, I recall that in polar coordinates, a point is represented as (r, \u03b8), where r is the distance from the orig",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me remember how to do this. Polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me remember how to do this. Polar coordinates are given as (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given as (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given as (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Let me recall how to do this. From what I remember, polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and",
+        "<think>\nOkay, so I need to convert the rectangular coordinates (0, 3) to polar coordinates. Hmm, let me recall how to do this. Polar coordinates are given by (r, \u03b8), where r is the distance from the origin to the point, and \u03b8 is the angle f"
+      ],
+      "raw_trace_path": "outputs/actual-model-benchmark/raw/active.jsonl",
+      "placement": {
+        "student_devices": [
+          "cuda:0"
+        ],
+        "teacher_devices": [
+          "cuda:0"
+        ],
+        "teacher_device_map": null,
+        "amp_enabled": true,
+        "amp_dtype": "bfloat16",
+        "amp_device_type": "cuda"
+      },
+      "telemetry_before": {
+        "memory": {
+          "allocated": 6155698176,
+          "reserved": 13222543360,
+          "max_allocated": 6155698176
+        },
+        "nvidia_smi": "0, NVIDIA GeForce RTX 4090, 13089, 24564, 0"
+      },
+      "telemetry_after": {
+        "memory": {
+          "allocated": 13041012736,
+          "reserved": 22959620096,
+          "max_allocated": 20827878912
+        },
+        "nvidia_smi": "0, NVIDIA GeForce RTX 4090, 22375, 24564, 97"
+      }
+    }
+  }
+}

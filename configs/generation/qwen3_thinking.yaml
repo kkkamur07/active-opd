@@ -1,0 +1,13 @@
+# Real thinking budget. At 1024 tokens every MATH trace was truncated mid-
+# <think>, so the verifier outcome was a length statistic rather than a
+# reasoning verdict. Median Qwen3 math trace is ~7k tokens, p95 ~18.5k.
+max_new_tokens: 18000
+do_sample: true
+temperature: 0.6
+top_p: 0.95
+top_k: 20
+repetition_penalty: 1.0
+num_return_sequences: 1
+enable_thinking: ${thinking.enabled}
+eos_token_id: null
+pad_token_id: null
