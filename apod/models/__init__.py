@@ -1,3 +1,4 @@
+from .generate_vllm import build_llm, generate_trajectories_vllm, render_prompt
 from .load import load_lm
 from .student import generate_trajectories
 from .teacher import generate_teacher, teacher_logits

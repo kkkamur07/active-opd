@@ -49,7 +49,23 @@ def save_npz(path: str | Path, batch: dict[str, Any]) -> Path:
         "prompt_length": np.asarray(batch["prompt_length"], dtype=np.int32),
         "responses": np.asarray(batch["responses"], dtype=object),
     }
+    if "finish_reasons" in batch:
+        arrays["finish_reasons"] = np.asarray(batch["finish_reasons"], dtype=object)
     if "logits" in batch:
         arrays["logits"] = np.asarray(batch["logits"], dtype=np.float16)
     np.savez_compressed(path, **arrays)
     return path
+
+
+def read_shards(directory: str | Path, pattern: str) -> list[dict[str, Any]]:
+    """Concatenate every shard file matching ``pattern`` in ``directory``.
+
+    Shards are written per GPU process (``trajectories.shard0.jsonl``, ...) so
+    two processes never append to one file. Example indices are disjoint across
+    shards, so concatenation is the whole merge.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for path in sorted(Path(directory).glob(pattern)):
+        rows.extend(read_jsonl(path))
+    return rows
