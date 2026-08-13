@@ -1,6 +1,0 @@
-# Budget-matched random control. The budget is set per round by the ablation
-# driver to match the active arm's retention; without it this arm is identical
-# to `all` and cannot separate "which rollouts" from "how many updates".
-policy: random
-budget: null
-seed: ${seed.value}

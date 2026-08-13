@@ -1,4 +1,0 @@
-# Standard OPD baseline: every rollout the verifier could actually grade.
-policy: all
-budget: null
-seed: ${seed.value}

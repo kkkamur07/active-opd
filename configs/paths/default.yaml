@@ -1,4 +1,0 @@
-output_dir: outputs/${experiment_name}
-run_dir: ${paths.output_dir}/${run_name}
-checkpoint_dir: ${paths.run_dir}/checkpoints
-log_dir: ${paths.run_dir}/logs

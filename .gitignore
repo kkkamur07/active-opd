@@ -9,10 +9,20 @@ wheels/
 # Virtual environments
 .venv
 
-# Generated run artifacts. Pilot evidence worth keeping lives in docs/.
+# Generated run artifacts
 outputs/
+
+# Hugging Face / local caches
+.cache/
+*.npz
+*.pt
+*.bin
+*.safetensors
 
 # Test artifacts
 .coverage
 .pytest_cache/
 htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/

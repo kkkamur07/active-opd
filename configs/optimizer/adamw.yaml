@@ -1,9 +1,0 @@
-# 8-bit Adam is off by default: with fp32 master weights on an H100 the memory
-# is affordable, and 8-bit states add quantization noise to an experiment whose
-# effect size is already small.
-name: adamw
-learning_rate: 1.0e-5
-weight_decay: 0.1
-betas: [0.9, 0.95]
-eps: 1.0e-8
-use_8bit: false

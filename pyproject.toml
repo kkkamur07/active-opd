@@ -1,36 +1,36 @@
 [project]
 name = "aopd"
 version = "0.1.0"
-description = "Hydra-configured active on-policy distillation prototype"
+description = "Active on-policy distillation experiment: Qwen3.5 student/teacher on OpenThoughts math"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "accelerate>=1.5",
     "datasets>=3.0",
-    "hydra-core>=1.3.2",
-    # Answer equivalence. Without it the verifier falls back to a conservative
-    # string comparator that reports "unverified" instead of guessing, which
-    # shrinks the training pool rather than poisoning it.
-    "math-verify>=0.5",
+    "loguru>=0.7",
+    "math-verify[antlr4_13_2]>=0.5",
     "numpy>=1.26",
     "torch>=2.6",
-    "transformers>=4.51,<6",
+    "tqdm>=4.66",
+    "transformers>=4.57",
 ]
 
-[project.optional-dependencies]
-quantization = [
-    "bitsandbytes>=0.45",
-]
-dev = [
-    "pytest>=8.0",
-]
+[project.scripts]
+apod-collect = "scripts.collect_trajectories:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["aopd", "scripts"]
+packages = ["apod", "scripts"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"configs" = "configs"
+# Driver here is 550.x (CUDA 12.4 max); PyPI's default torch is now a cu130
+# build, which silently falls back to CPU. Pin the cu126 wheels.
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

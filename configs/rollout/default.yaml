@@ -1,4 +1,0 @@
-num_rollouts_per_prompt: 8
-max_new_tokens: ${generation.max_new_tokens}
-retain_token_ids: true
-prompt_batch_size: 4
