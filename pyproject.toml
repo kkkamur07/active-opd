@@ -37,17 +37,20 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["apod", "scripts"]
 
-# cu129, because that is the variant vLLM's PyPI wheel is compiled against. The
-# previous cu126 pin was justified by a driver 550.x that was never installed on
-# this machine, and would have been an ABI mismatch against vLLM. Do not swap this
-# for `--torch-backend=auto`: it inspects the driver, sees a CUDA-13-capable 595,
-# and picks cu130. See docs/versions.md.
+# cu130, because vLLM 0.26.0's PyPI wheel is a CUDA 13 build: it depends on
+# nvidia-cutlass-dsl[cu13] and its _C_stable_libtorch extension links libcudart.so.13.
+# A cu129 torch ships libcudart.so.12 instead, and `import vllm` then dies with
+# "ImportError: libcudart.so.13: cannot open shared object file". Verified on this
+# machine. Driver 595 reports CUDA 13.2 and the CUDA 13.x floor is 580.65.06, so the
+# 13.3 runtime the wheels carry is covered by minor version compatibility.
+# The earlier cu126 pin was justified by a driver 550.x that never existed here.
+# See docs/versions.md.
 [[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu129" }
-torchvision = { index = "pytorch-cu129" }
-torchaudio = { index = "pytorch-cu129" }
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }

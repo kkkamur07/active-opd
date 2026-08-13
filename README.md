@@ -9,24 +9,27 @@ Qwen did not publish MATH-500 for these small models. Official thinking-mode sco
 | HMMT Feb 25 | 22.9 | 83.2 | +60.3 |
 | HMMT Nov 25 | 19.6 | 82.9 | +63.3 |
 | PolyMATH | 26.1 | 57.3 | +31.2 |
-| GPQA Diamond | 51.6 | 81.7 | +30.1 |
+| GPQA for 2B, GPQA Diamond for 9B | 51.6 | 81.7 | +30.1 |
+
+The model cards use different labels for the last row, so do not read it as a strict
+like-for-like comparison without checking the benchmark definitions.
 
 ## This pass
 
-A pre-filter experiment. It stops when the selected trace index sets are on disk — no
-teacher forward, no KL acquisition, no training.
+A pre-filter experiment. It stops when the selected trace index sets are on disk. The
+default pass does not run the teacher, acquire KL targets, or train the student.
 
 Per prompt: sample 16 student traces, score each, keep the top k=4 under three policies
 (`H+correct`, `H+incorrect`, `random`). N=128 prompts, seed 42.
 
-vLLM generates, HuggingFace scores. vLLM has no autograd and cannot train anything; it is
-a rollout engine. The two never share a GPU — the engine holds 90% of the card for KV
-cache, so the HF model will not fit next to it.
+vLLM generates and Hugging Face scores. vLLM has no autograd and cannot train; it is a
+rollout engine. Run the two stages separately. The vLLM engine reserves 90% of the card
+for its KV cache, so the Hugging Face model will not fit beside it.
 
 ## Setup
 
 Machine prep (disk, NVIDIA driver, uv environment) is in [docs/setup.md](docs/setup.md).
-Why each version was chosen — and why TRL, not vLLM, is the binding constraint — is in
+The version constraints and the reason TRL limits the vLLM choice are in
 [docs/versions.md](docs/versions.md).
 
 ```bash
@@ -60,7 +63,7 @@ wait
 # 4. Is the rollout pool worth filtering at all?
 uv run python -m scripts.rollout_report
 
-# 5. Student entropy (vLLM must be gone; these load HF), then rank on CPU
+# 5. Student entropy (stop vLLM first; this stage loads Hugging Face), then rank on CPU
 CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.select_traces --stage entropy --shard 0 --num-shards 2 &
 CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.select_traces --stage entropy --shard 1 --num-shards 2 &
 wait
