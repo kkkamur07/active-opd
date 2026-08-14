@@ -28,13 +28,15 @@ for its KV cache, so the Hugging Face model will not fit beside it.
 
 ## Setup
 
-Machine prep (disk, NVIDIA driver, uv environment) is in [docs/setup.md](docs/setup.md).
-The version constraints and the reason TRL limits the vLLM choice are in
-[docs/versions.md](docs/versions.md).
+Machine setup, version choices, dataset limits, and rollout findings are in
+[docs/guide.md](docs/guide.md).
 
 ```bash
 uv sync --extra vllm
 ```
+
+The environment must use the cu130 torch build selected by vLLM 0.26.0. The
+reason and the CUDA troubleshooting steps are in [docs/guide.md](docs/guide.md#cuda-troubleshooting).
 
 ## Running
 
@@ -50,41 +52,24 @@ CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.token_lengths --shard 1 --num-sh
   --num-examples 64 --num-rollouts 1 --max-new-tokens 16384 --presence-penalty 1.5 &
 wait
 
-# 2. Select the prompt pool (CPU only)
-uv run python -m scripts.collect_trajectories --select-only --num-examples 128 --seed 42
-
-# 3. Sample 16 traces per prompt
-CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.collect_trajectories --resume \
-  --num-examples 128 --num-rollouts 16 --shard 0 --num-shards 2 &
-CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.collect_trajectories --resume \
-  --num-examples 128 --num-rollouts 16 --shard 1 --num-shards 2 &
-wait
-
-# 4. Is the rollout pool worth filtering at all?
+# 2. Is a rollout pool worth filtering at all?
 uv run python -m scripts.rollout_report
 
-# 5. Student entropy (stop vLLM first; this stage loads Hugging Face), then rank on CPU
-CUDA_VISIBLE_DEVICES=0 uv run python -m scripts.select_traces --stage entropy --shard 0 --num-shards 2 &
-CUDA_VISIBLE_DEVICES=1 uv run python -m scripts.select_traces --stage entropy --shard 1 --num-shards 2 &
-wait
-uv run python -m scripts.select_traces --stage rank --k 4
+# 3. The pipeline itself (rollouts, entropy scoring, selection, GKD training,
+#    eval) is driven by `python -m apod.main`.
 ```
 
 `H(τ) = mean_t Entropy(π_S(· | x, y_<t))` over response positions. Logits are never
 materialised in full: the vocab is ~248k, so a 16k-token float32 logit tensor is ~16 GB.
 The body runs once and the lm_head is applied in time-slices.
 
-Output: `outputs/trajectories/selected/{h_correct,h_incorrect,random}.jsonl`, plus
-`summary.json` reporting whether entropy actually separates correct from incorrect traces.
-If those two means coincide, an entropy prefilter is noise and the experiment says so.
-
 ## Layout
 
 ```
 apod/
   datasets/       load.py, io.py
-  models/         load.py, student.py, teacher.py, generate_vllm.py
+  models/         load.py, generate_vllm.py, vllm_qwen35.py, presence_penalty.py
   verification/   verify.py
-scripts/          token_lengths.py, collect_trajectories.py, rollout_report.py, select_traces.py
-docs/             versions.md, setup.md
+scripts/          token_lengths.py, rollout_report.py, check_run.py, verify_*.py
+docs/             guide.md, adr/
 ```
