@@ -3,31 +3,53 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 
-def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+def read_jsonl(path: str | Path, *, drop_torn_tail: bool = False) -> list[dict[str, Any]]:
+    """Read a jsonl file; ``drop_torn_tail`` tolerates a truncated LAST line.
+
+    Resume readers of append-mode shard files set it: a kill or power loss
+    mid-append leaves a partial final line, and without tolerance every later
+    resume dies on JSONDecodeError until someone hand-edits the file. Only
+    the final line is forgiven -- corruption anywhere else still raises.
+    """
     path = Path(path)
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+    lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()]
+    lines = [ln for ln in lines if ln]
+    for i, line in enumerate(lines):
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            if drop_torn_tail and i == len(lines) - 1:
+                break
+            raise
     return rows
 
 
 def write_jsonl(path: str | Path, rows: Any) -> None:
+    """Atomic whole-file write (tmp + fsync + rename).
+
+    Several callers use the file's bare existence as a done-marker
+    (selected.jsonl, metrics.jsonl rewrite), so a crash mid-write must never
+    leave a plausible-looking partial file.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
 
 
 def append_jsonl(path: str | Path, row: dict[str, Any]) -> None:

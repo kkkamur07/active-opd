@@ -1,0 +1,6 @@
+# Student is trained; teacher is frozen and only ever used inside GKDTrainer.
+student_id: Qwen/Qwen3.5-2B
+teacher_id: Qwen/Qwen3.5-9B
+# Qwen3.5 chat template flag; applied identically at rollout, eval, and
+# (via stored token ids) training. Changing it invalidates the run.
+enable_thinking: true

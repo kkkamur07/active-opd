@@ -1,0 +1,7 @@
+# Training prompt pool. Prompts are sampled once for the whole run with
+# `pool_seed`, then consumed without replacement: round r takes slice
+# [r*num_prompts, (r+1)*num_prompts). All arms see identical prompts in a
+# given round, which removes prompt-sampling variance from the comparison.
+dataset: openthoughts            # key into apod.datasets.load.DATASETS
+split: null                      # null -> the dataset's default split
+pool_seed: ${seed}

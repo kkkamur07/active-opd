@@ -1,0 +1,37 @@
+# @package _global_
+# End-to-end smoke test: every stage runs for real (vLLM engine, entropy
+# scoring, DDP GKD training, eval, plot) at reduced but meaningful scale.
+#   python -m apod.main +experiment=smoke
+#
+# rounds: 3 so TWO consecutive checkpoint-to-checkpoint transitions run
+# (round 1 trains from round 0's checkpoint, round 2 from round 1's) -- the
+# path where cumulative save/load drift would live -- plus round 3 terminal
+# eval, giving 3 data points per arm.
+#
+# max_new_tokens inherits the REAL 8192. It was 2048 when the plan was to
+# exercise more natural EOS finishes, but the 24k length diagnostic showed
+# 62.5% of traces never finish even at 24,576 -- 2048 buys no extra EOS
+# coverage -- and the pre-registered PRIMARY endpoint is STRICT avg@4, which
+# is ~0 at 2048 (cap_hit 1.0, no \boxed): a 2048 smoke would rehearse a
+# degenerate primary metric. 8192 matches the real regime smoke8k validated
+# (~+45 min).
+#
+# run_name smoke3: smoke2 ran with eval 16x2 (32 samples, SE ~6.3% -- arm
+# curves were pure noise); this profile evaluates 100x4 so smoke exercises the
+# real avg@4/pass@4 protocol (num_samples inherits math500's 4) at SE ~1.8%.
+# outputs/runs/smoke was produced under rounds: 1 semantics -- never resume it.
+run_name: smoke3
+rounds: 3
+
+rollout:
+  num_prompts: 8
+  # num_rollouts inherits the real 12 (k=4 of 12 -- same selectivity as real)
+
+eval:
+  num_problems: 100      # 1/5 of MATH-500; num_samples inherits the real 4
+  # 400 samples/eval adds ~14 min per arm vs the old 32 (measured ~3.5k tok/s
+  # across both engines) -- a ~75 min smoke, the price of readable curves
+
+train:
+  gradient_accumulation_steps: 2  # 2 ranks x 2 = effective batch 4
+  effective_batch: 4

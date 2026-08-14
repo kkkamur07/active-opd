@@ -1,0 +1,9 @@
+# Trajectory-level selection: per prompt, from num_rollouts trajectories keep
+# k by the arm's policy. Truncated (cap-hit) trajectories are ELIGIBLE for
+# selection and training (ADR 0002); they are only excluded from accuracy.
+k: 4
+# Entropy scoring (HF forward pass, time-sliced lm_head) is only required by
+# the entropy_top4 arm. Scoring the other arms doubles their GPU cost purely
+# for monitoring; flip on if you want per-round entropy curves for all arms.
+score_all_arms: false
+logit_chunk: 512                 # response positions per lm_head slice

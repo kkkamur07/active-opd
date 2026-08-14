@@ -1,0 +1,20 @@
+# @package _global_
+# Performance smoke at REAL trace lengths: identical to the real run except
+# for prompt/eval counts and rounds. This is the profile that measures rollout
+# throughput, entropy scoring, and DDP train step time at max_new_tokens=8192
+# (the 1024-token smoke understates activations ~8x), and it warms the pinned
+# vLLM compile cache for the real run's checkpoint reloads.
+#   python -m apod.main +experiment=smoke8k
+run_name: smoke8k
+rounds: 1
+
+rollout:
+  num_prompts: 8
+  # num_rollouts inherits the real 12
+
+eval:
+  num_problems: 16
+  num_samples: 4        # real num_samples: measures the real eval batch shape
+
+# sampling.max_new_tokens stays at the real 8192; train stays at the real
+# gradient_accumulation_steps (2 ranks x 8 = effective 16).

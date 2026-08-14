@@ -1,0 +1,8 @@
+# vLLM engine settings. One engine per GPU per stage process, never TP
+# (apod.models.build_llm enforces this). The engine is rebuilt from the latest
+# checkpoint each round -- that rebuild IS the weight sync.
+gpu_memory_utilization: 0.90
+max_model_len: 16384             # prompt + 8192-token response with headroom
+# Auto chunk sizing targets this many concurrent sequences per engine; measured
+# sweet spot for A100 80GB at these lengths (pre-experiment sweep, 2026-08).
+target_concurrent_sequences: 128

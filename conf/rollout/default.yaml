@@ -1,0 +1,6 @@
+# Per-round rollout budget. 128 prompts x 12 rollouts = 1536 trajectories per
+# round per arm; selection keeps k of 12 per prompt (see conf/selection).
+num_prompts: 128
+num_rollouts: 12  # k=4 of 12 keeps the top 33% (~1.10 sigma above the mean);
+                  # 4-of-8 kept the top half (~0.80 sigma), barely different
+                  # from random selection at the boundary

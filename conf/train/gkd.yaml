@@ -1,0 +1,54 @@
+# GKDTrainer settings (trl.experimental.gkd, TRL 1.10.0). ADR 0001.
+# Values verified against the installed 1.10.0 source (gkd_trainer.py /
+# gkd_config.py / experimental/utils.py DataCollatorForChatML).
+
+# --- OPD objective ---
+beta: 1.0                # 1.0 hits the special-cased exact branch: pure
+                         # reverse KL(pi_S || pi_T), mode-seeking, gradient
+                         # through the student (gkd_trainer.py:281)
+lmbda: 0.0               # per-step Bernoulli(p) of in-trainer generation;
+                         # 0.0 -> always train on our provided trajectories
+# No temperature key on purpose: GKDConfig.temperature is generation-only in
+# 1.10.0 — compute_loss never forwards it, the divergence is always computed
+# at T=1.0 (gkd_trainer.py:422-428). Exactly what we want.
+
+# --- optimization (fresh trainer per round, checkpoint-to-checkpoint) ---
+learning_rate: 2.0e-5    # full-finetune scale (tinker's 1e-4 is LoRA-scale)
+lr_scheduler_type: constant
+warmup_steps: 0
+num_train_epochs: 1
+per_device_train_batch_size: 1   # PER RANK; sequences are up to prompt+8192 tokens
+gradient_accumulation_steps: 8   # 2 DDP ranks x 1 x 8 = effective batch of 16
+                                 # sequences, unchanged from the single-GPU 16
+effective_batch: 16              # ASSERTED by the train stage: world_size x
+                                 # per_device x grad_accum must equal this, so
+                                 # changing num_gpus without retuning accum
+                                 # fails loudly instead of silently changing
+                                 # the optimizer trajectory
+max_grad_norm: 1.0
+weight_decay: 0.0
+
+# --- memory / precision ---
+bf16: true
+gradient_checkpointing: true
+use_liger_kernel: true   # chunked LigerFusedLinearJSDLoss: the divergence is
+                         # computed in ~1024-token chunks fused with lm_head,
+                         # so the (seq x 248k-vocab) logit tensors never
+                         # materialize — without this, one fp32 copy is
+                         # ~7.6 GiB at 8192 tokens and train OOMs (smoke8k).
+                         # beta==1 branch is the same reverse-KL line as TRL's
+                         # eager path (verified liger 0.8.1 == trl 1.10.0);
+                         # TRL sets weight_hard_loss=0, weight_soft_loss=1.
+teacher_dtype: bfloat16  # becomes teacher_model_init_kwargs={"dtype": ...};
+                         # the "dtype" key is MANDATORY once kwargs are passed
+                         # (gkd_trainer.py:182-186 indexes it unconditionally)
+max_length: 16384        # pre-tokenized rows bypass collator truncation, but
+                         # set it anyway so the 1024 default can never bite
+
+# --- bookkeeping ---
+logging_steps: 1
+save_strategy: "no"      # driver saves the checkpoint explicitly at round end
+seed: ${seed}
+train_gpu: 0             # fallback GPU when num_gpus == 1; with num_gpus > 1
+                         # the driver launches torchrun DDP across all GPUs
+                         # (student + frozen teacher replicated per rank)

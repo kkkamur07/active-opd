@@ -1,0 +1,17 @@
+# MATH-500 protocol (ADR 0003). avg@4 is primary (unbiased pass@1 estimator,
+# ~±1.1% noise at 2000 trials); pass@4 is the diversity/mode-collapse monitor
+# computed from the same samples. Sampling params are shared with rollouts
+# (conf/sampling) on purpose -- do not add eval-specific sampling here.
+dataset: math500                 # key into apod.datasets.load.DATASETS
+num_problems: 500                # the whole set
+num_samples: 4                   # samples per problem -> avg@4 / pass@4
+# Intermediate rounds (0 < round < rounds) evaluate only the FIRST N problems
+# of the materialized set (SE ~1.8 pts at 100x4) -- the pre-registered
+# primary endpoint is the TERMINAL strict avg@4, which always runs the full
+# set, as does round 0 (the anchor). Clamped to num_problems.
+intermediate_num_problems: 100
+# Deterministic per (round, problem): seed + eval_seed_offset + problem index,
+# so re-runs of a round reproduce and rounds differ.
+eval_seed_offset: 100000
+# Round 0 evaluates the base student before any training (the anchor point);
+# a final eval-only pass measures the checkpoint after the last round.

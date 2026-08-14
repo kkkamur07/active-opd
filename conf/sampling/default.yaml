@@ -1,0 +1,17 @@
+# Sampling used for BOTH rollouts and MATH-500 eval, all arms (ADR 0002/0003).
+# Changing anything here mid-experiment invalidates every curve; the driver
+# stamps these values into each round's manifest for exactly that reason.
+temperature: 1.0
+top_p: 0.95
+top_k: 20
+# 0.0 = OFF (deliberate): generation and entropy scoring then use the SAME
+# distribution, which keeps the method genuinely on-policy and removes the
+# length->entropy coupling a penalty introduces (see docs/smoke_report.md).
+# The tradeoff is degenerate repetition risk; the smoke report measures it.
+# To re-enable, set a value and fast_presence_penalty: true (the incremental
+# processor in apod/models/presence_penalty.py, token-identical to native).
+presence_penalty: 0.0
+fast_presence_penalty: false
+# Hard cap per trajectory. Cap-hit trajectories are kept for training and
+# graded incorrect for reporting (ADR 0002).
+max_new_tokens: 8192

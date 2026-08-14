@@ -1,0 +1,54 @@
+# Root experiment config. Every setting lives in this tree; nothing is
+# hard-coded in scripts. Override from the CLI per Hydra convention, e.g.:
+#   python -m apod.main rounds=2 rollout.num_prompts=64
+#   python -m apod.main +experiment=smoke
+defaults:
+  - model: qwen35
+  - data: openthoughts
+  - rollout: default
+  - sampling: default
+  - engine: default
+  - eval: math500
+  - selection: default
+  - train: gkd
+  - _self_
+
+# Run identity. All artifacts land under output_dir; re-running with the same
+# run_name resumes from whatever stages already completed (resume: true).
+run_name: apod
+output_dir: outputs/runs/${run_name}
+resume: true
+# Per arm, keep weight files for only the newest N round checkpoints; older
+# rounds keep configs/manifests but lose model.safetensors (3.6 GB each,
+# never read again by the pipeline -- resume and the next round only need the
+# latest). Keep-LAST-N, deliberately not keep-best-N: the eval metric's noise
+# exceeds per-round differences, so "best" would rank on luck, and the
+# contiguous recent tail is what re-evaluation / re-running an arm from round
+# k needs. 5 = 54 GB across three arms, sized for the 246 GB disk (2026-08-14
+# resize); was 1 when the disk was 74 GB.
+keep_checkpoints: 5
+
+# The three arms, run sequentially (students diverge after round 1; 2 GPUs).
+#   entropy_top4  keep the k most-uncertain of num_rollouts trajectories
+#   random_top4   keep k uniformly at random (selection-effect control)
+#   all           standard OPD on every rollout (budget control)
+arms:
+  - entropy_top4
+  - random_top4
+  - all
+
+# Rounds of the iterative loop. Each round: engine up from latest checkpoint ->
+# MATH-500 eval + rollouts -> teardown -> entropy scoring -> selection -> GKD
+# training -> checkpoint. A final eval-only pass measures the last checkpoint.
+rounds: 8
+
+num_gpus: 2
+seed: 42
+
+hydra:
+  # Hydra's chdir/output management is disabled: the driver owns output_dir and
+  # stages are subprocesses that must agree on absolute paths.
+  job:
+    chdir: false
+  run:
+    dir: ${output_dir}/hydra/${now:%Y-%m-%d_%H-%M-%S}
