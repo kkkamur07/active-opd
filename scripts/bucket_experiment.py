@@ -12,13 +12,19 @@ Locked design:
   sets, RE-SCORED EVERY ROUND with the current student ("rescore every round
   that is more true").
 - Buckets: per-prompt reverse-KL tertiles of the 12 student rollouts ->
-  kl_high (ranks 1-4) / kl_mid (5-8) / kl_low (9-12), 512 trajectories each.
-  At round 0 all arms are the identical base policy, so the tertiles
-  partition ONE shared scored pool; from round 1 each arm generates and
-  re-scores its own.
-- 3 training rounds per arm (0,1,2) + terminal eval; identical
-  hyperparameters, micro-batch 2 across all arms; eval 500x4 at 16384 every
-  round; fresh 16384 base eval (the shared round-0 eval) is the baseline.
+  kl_high (ranks 1-4) / kl_mid (5-8) / kl_low (9-12), 512 trajectories each,
+  plus a RANDOM control arm (random 4 of 12 per prompt, re-sampled each
+  round; USER 2026-08-15: "there should be random control"). At round 0 all
+  arms are the identical base policy, so selections partition/sample ONE
+  shared scored pool; from round 1 each arm generates and re-scores its own.
+- 4 training rounds per arm (0..3) + terminal eval (USER: "make the rounds
+  to 4"); identical hyperparameters, micro-batch constant across all arms;
+  eval 500x4 at 16384 every round; fresh 16384 base eval (the shared
+  round-0 eval) is the baseline.
+- No go/no-go gate on tertile separation (USER: "don't agree with gates just
+  run the experiment") -- separation and per-bucket truncation/correctness/
+  length ARE reported each round (bucket_stats.jsonl + logs), just not
+  gated on.
 
 Usage:
   uv run python scripts/bucket_experiment.py --build   # run dirs + configs
@@ -31,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -45,7 +52,8 @@ SOURCE_RUN = ROOT / "outputs/runs/apod"
 RUN_DIR = ROOT / "outputs/runs/oracle16k"
 TEACHER_RUN = ROOT / "outputs/runs/oracle16k_teacher"
 BUCKETS = ("kl_high", "kl_mid", "kl_low")
-TRAIN_ROUNDS = 3  # trains at rounds 0..2; round 3 is the terminal eval-only
+ARMS = BUCKETS + ("random",)  # random-4-of-12 control, re-sampled each round
+TRAIN_ROUNDS = 4  # trains at rounds 0..3; round 4 is the terminal eval-only
 NUM_ROLLOUTS = 12
 TEACHER_ROLLOUTS = 4
 
@@ -177,7 +185,6 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path) -> None:
     by_example: dict[int, list[dict]] = defaultdict(list)
     for r in oracle:
         by_example[r["example_index"]].append(r)
-    tertile = BUCKETS.index(arm)
     rows = []
     for example_index in sorted(by_example):
         ranked = sorted(
@@ -186,7 +193,15 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path) -> None:
         assert len(ranked) == NUM_ROLLOUTS, (
             f"example {example_index}: {len(ranked)} scored rollouts, expected {NUM_ROLLOUTS}"
         )
-        for r in ranked[tertile * 4 : (tertile + 1) * 4]:
+        if arm == "random":
+            # Control: random 4 of 12, re-sampled each round. Deterministic
+            # seed per (round, example) so resume replays the same draw.
+            rng = random.Random(f"oracle16k-r{rnd}-e{example_index}")
+            picks = [ranked[i] for i in sorted(rng.sample(range(NUM_ROLLOUTS), 4))]
+        else:
+            tertile = BUCKETS.index(arm)
+            picks = ranked[tertile * 4 : (tertile + 1) * 4]
+        for r in picks:
             key = (r["example_index"], r["rollout_index"])
             rows.append(
                 {
@@ -204,10 +219,29 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path) -> None:
     with sel_path.open("w") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
-    kls = [r["mean_reverse_kl"] for r in rows]
+    # Per-bucket per-round composition (USER: report, don't gate): tertile
+    # separation, truncation %, correctness %, mean length.
+    kls = sorted(r["mean_reverse_kl"] for r in rows)
+    stats = {
+        "arm": arm,
+        "round": rnd,
+        "n": len(rows),
+        "rkl_min": kls[0],
+        "rkl_median": kls[len(kls) // 2],
+        "rkl_mean": sum(kls) / len(kls),
+        "rkl_max": kls[-1],
+        "fkl_mean": sum(r["mean_forward_kl"] for r in rows) / len(rows),
+        "truncated_pct": sum(r["truncated"] for r in rows) / len(rows),
+        "correct_pct": sum(r["correct"] for r in rows) / len(rows),
+        "mean_length": sum(r["response_length"] for r in rows) / len(rows),
+    }
+    with (RUN_DIR / "bucket_stats.jsonl").open("a") as f:
+        f.write(json.dumps(stats) + "\n")
     log(
-        f"{arm} r{rnd}: selected {len(rows)} rows, reverse-KL "
-        f"min {min(kls):.4f} median {sorted(kls)[len(kls)//2]:.4f} max {max(kls):.4f}"
+        f"{arm} r{rnd}: {stats['n']} rows | rkl mean {stats['rkl_mean']:.4f} "
+        f"[{stats['rkl_min']:.4f}..{stats['rkl_max']:.4f}] | fkl mean {stats['fkl_mean']:.4f} "
+        f"| trunc {stats['truncated_pct']:.1%} | correct {stats['correct_pct']:.1%} "
+        f"| len {stats['mean_length']:.0f}"
     )
 
 
@@ -323,9 +357,9 @@ def drive() -> None:
     teacher_tokens = arm_round(TEACHER_RUN, "all", 0) / "rollouts" / "tokens"
 
     # Shared round-0 block: one pool, scored once, partitioned three ways.
-    run_rollout_eval(RUN_DIR, BUCKETS[0], 0, eval_only=False)
-    for arm in BUCKETS[1:]:
-        _copy_shared_round0(BUCKETS[0], arm)
+    run_rollout_eval(RUN_DIR, ARMS[0], 0, eval_only=False)
+    for arm in ARMS[1:]:
+        _copy_shared_round0(ARMS[0], arm)
     r0_oracle = arm_round(RUN_DIR, BUCKETS[0], 0) / "oracle"
     run_score(
         arm_round(RUN_DIR, BUCKETS[0], 0) / "rollouts" / "tokens",
@@ -335,7 +369,7 @@ def drive() -> None:
         teacher_tokens, RUN_DIR / "teacher_scoring" / "round_00_base",
         checkpoint_path(BUCKETS[0], 0), expected=128 * TEACHER_ROLLOUTS,
     )
-    for arm in BUCKETS:
+    for arm in ARMS:
         write_selection(arm, 0, r0_oracle)
 
     # Micro-batch probe on the real 16384 data BEFORE any real train step;
@@ -344,9 +378,9 @@ def drive() -> None:
 
     # Iterative rounds, re-scored per arm from its current policy.
     for rnd in range(TRAIN_ROUNDS):
-        for arm in BUCKETS:
+        for arm in ARMS:
             run_train(arm, rnd)
-        for arm in BUCKETS:
+        for arm in ARMS:
             terminal = rnd + 1 == TRAIN_ROUNDS
             run_rollout_eval(RUN_DIR, arm, rnd + 1, eval_only=terminal)
             if not terminal:
