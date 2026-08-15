@@ -17,18 +17,14 @@ learning_rate: 2.0e-5    # full-finetune scale (tinker's 1e-4 is LoRA-scale)
 lr_scheduler_type: constant
 warmup_steps: 0
 num_train_epochs: 1
-per_device_train_batch_size: 4   # PER RANK; sequences are up to prompt+8192
-                                 # tokens. USER DECISIONS 2026-08-15: 1 -> 2
-                                 # (measured micro-1 peak 41.2/80 GiB, util
-                                 # ~36-56% -- underutilized), then 2 -> 4 mid
-                                 # real-run between r00 and r01 trains (micro-2
-                                 # measured 45.3 GiB peak, 121 s/step; linear
-                                 # fit projects ~53.5 GiB at 4). The apod run's
-                                 # entropy_top4 r00 trained at micro 2; later
-                                 # rounds at 4 -- same effective batch, not
-                                 # bit-identical reduction order (recorded in
-                                 # the run notes, accepted by the user).
-gradient_accumulation_steps: 4   # 2 DDP ranks x 4 x 4 = effective batch of 32
+per_device_train_batch_size: 2   # PER RANK. Micro-batch history (all at eff
+                                 # 32): the 8192-cap apod run measured micro-1
+                                 # 41.2 GiB / micro-2 45.3 GiB / micro-4 59.2
+                                 # GiB peak (superlinear per sequence). With
+                                 # the cap now 16384, micro 4 does not fit --
+                                 # 2 is the ceiling-safe setting for 16k
+                                 # sequences (measure before raising).
+gradient_accumulation_steps: 8   # 2 DDP ranks x 2 x 8 = effective batch of 32
                                  # sequences. USER DECISION 2026-08-15: eff 32,
                                  # raised from 16 for training stability --
                                  # smoke3 at effective 4 oscillated violently

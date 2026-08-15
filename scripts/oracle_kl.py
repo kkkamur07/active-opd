@@ -54,6 +54,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--analyze", action="store_true", help="analyze finished shards, no GPU")
+    p.add_argument("--student-path", default=STUDENT_ID,
+                   help="student model id or checkpoint dir (re-scoring later rounds)")
+    p.add_argument("--tokens-dir", type=Path, default=None,
+                   help="override the rollout tokens dir (e.g. teacher trajectories)")
+    p.add_argument("--out-dir", type=Path, default=None,
+                   help="override the output dir (default <round>/oracle)")
     return p.parse_args()
 
 
@@ -62,7 +68,8 @@ def round_dir(args) -> Path:
 
 
 def out_path(args, shard: int) -> Path:
-    return round_dir(args) / "oracle" / f"oracle_kl.shard{shard}.jsonl"
+    base = args.out_dir if args.out_dir is not None else round_dir(args) / "oracle"
+    return base / f"oracle_kl.shard{shard}.jsonl"
 
 
 def compute(args) -> None:
@@ -70,7 +77,8 @@ def compute(args) -> None:
     from transformers import AutoModelForCausalLM
 
     device = "cuda"
-    npzs = sorted((round_dir(args) / "rollouts" / "tokens").glob("example_*.npz"))
+    tokens_dir = args.tokens_dir if args.tokens_dir is not None else round_dir(args) / "rollouts" / "tokens"
+    npzs = sorted(tokens_dir.glob("example_*.npz"))
     npzs = [p for i, p in enumerate(npzs) if i % args.num_shards == args.shard]
 
     out = out_path(args, args.shard)
@@ -84,7 +92,7 @@ def compute(args) -> None:
         TEACHER_ID, dtype=torch.bfloat16, device_map=device
     ).eval()
     student = AutoModelForCausalLM.from_pretrained(
-        STUDENT_ID, dtype=torch.bfloat16, device_map=device
+        args.student_path, dtype=torch.bfloat16, device_map=device
     ).eval()
 
     with out.open("a") as f:
