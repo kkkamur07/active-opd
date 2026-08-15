@@ -105,7 +105,7 @@ def compute(args) -> None:
                     s_logits = student(input_ids=ids).logits[0]
                 # Reverse KL at response positions: prediction at position t-1
                 # scores the token emitted at t, so slice [plen-1, plen+rlen-1).
-                rkl_sum, fkl_sum, n = 0.0, 0.0, 0
+                rkl_sum, fkl_sum, sent_sum, tent_sum, n = 0.0, 0.0, 0.0, 0.0, 0
                 for lo in range(plen - 1, plen + rlen - 1, POSITION_CHUNK):
                     hi = min(lo + POSITION_CHUNK, plen + rlen - 1)
                     lp_s = torch.log_softmax(s_logits[lo:hi].float(), dim=-1)
@@ -115,6 +115,11 @@ def compute(args) -> None:
                     fkl = (lp_t.exp() * -diff).sum(-1)  # KL(T||S) per position
                     rkl_sum += float(rkl.sum())
                     fkl_sum += float(fkl.sum())
+                    # Mean token entropies of both models on the same positions
+                    # (student entropy cross-checks the entropy stage's stored
+                    # scores; teacher entropy is new signal).
+                    sent_sum += float(-(lp_s.exp() * lp_s).sum(-1).sum())
+                    tent_sum += float(-(lp_t.exp() * lp_t).sum(-1).sum())
                     n += rkl.shape[0]
                     del lp_s, lp_t, diff, rkl, fkl
                 del t_logits, s_logits
@@ -126,6 +131,8 @@ def compute(args) -> None:
                             "rollout_index": k,
                             "mean_reverse_kl": rkl_sum / max(n, 1),
                             "mean_forward_kl": fkl_sum / max(n, 1),
+                            "student_entropy": sent_sum / max(n, 1),
+                            "teacher_entropy": tent_sum / max(n, 1),
                             "response_length": rlen,
                             "truncated": bool(truncated[k]),
                         }
