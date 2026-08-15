@@ -16,7 +16,9 @@ Locked design:
   plus a RANDOM control arm (random 4 of 12 per prompt, re-sampled each
   round; USER 2026-08-15: "there should be random control"). At round 0 all
   arms are the identical base policy, so selections partition/sample ONE
-  shared scored pool; from round 1 each arm generates and re-scores its own.
+  shared scored pool; from round 1 each KL arm generates and re-scores its
+  own. The random arm's later rounds are NOT scored (USER: "drop the scoring
+  on random arm") -- it just rolls out, samples 4, trains.
 - 4 training rounds per arm (0..3) + terminal eval (USER: "make the rounds
   to 4"); identical hyperparameters, micro-batch constant across all arms;
   eval 500x4 at 16384 every round; fresh 16384 base eval (the shared
@@ -24,7 +26,8 @@ Locked design:
 - No go/no-go gate on tertile separation (USER: "don't agree with gates just
   run the experiment") -- separation and per-bucket truncation/correctness/
   length ARE reported each round (bucket_stats.jsonl + logs), just not
-  gated on.
+  gated on. The round-0 separation is relayed to the user as soon as the
+  shared pool is scored: THEY decide whether to pull the plug.
 
 Usage:
   uv run python scripts/bucket_experiment.py --build   # run dirs + configs
@@ -169,36 +172,41 @@ def run_train(arm: str, rnd: int) -> None:
     subprocess.run(cmd, check=True, env={**os.environ, "HF_HUB_OFFLINE": "1"})
 
 
-def write_selection(arm: str, rnd: int, oracle_dir: Path) -> None:
+def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
+    """oracle_dir=None: unscored pool (random arm rounds >= 1 -- USER
+    2026-08-15: "drop the scoring on random arm"); select from trajectory
+    metadata alone."""
     rdir = arm_round(RUN_DIR, arm, rnd)
     sel_path = rdir / "selected" / "selected.jsonl"
     if sel_path.exists():
         log(f"{arm} r{rnd} selection already written")
         return
-    oracle = []
-    for shard in sorted(oracle_dir.glob("oracle_kl.shard*.jsonl")):
-        oracle.extend(read_jsonl(shard))
     meta = {}
     for shard in sorted((rdir / "rollouts").glob("trajectories.shard*.jsonl")):
         for r in read_jsonl(shard):
             meta[(r["example_index"], r["rollout_index"])] = r
     by_example: dict[int, list[dict]] = defaultdict(list)
-    for r in oracle:
-        by_example[r["example_index"]].append(r)
+    if oracle_dir is not None:
+        for shard in sorted(oracle_dir.glob("oracle_kl.shard*.jsonl")):
+            for r in read_jsonl(shard):
+                by_example[r["example_index"]].append(r)
+    else:
+        assert arm == "random", f"{arm} requires a scored pool"
+        for (example_index, _), r in sorted(meta.items()):
+            by_example[example_index].append(r)
     rows = []
     for example_index in sorted(by_example):
-        ranked = sorted(
-            by_example[example_index], key=lambda r: r["mean_reverse_kl"], reverse=True
-        )
-        assert len(ranked) == NUM_ROLLOUTS, (
-            f"example {example_index}: {len(ranked)} scored rollouts, expected {NUM_ROLLOUTS}"
+        pool = by_example[example_index]
+        assert len(pool) == NUM_ROLLOUTS, (
+            f"example {example_index}: {len(pool)} rollouts, expected {NUM_ROLLOUTS}"
         )
         if arm == "random":
             # Control: random 4 of 12, re-sampled each round. Deterministic
             # seed per (round, example) so resume replays the same draw.
             rng = random.Random(f"oracle16k-r{rnd}-e{example_index}")
-            picks = [ranked[i] for i in sorted(rng.sample(range(NUM_ROLLOUTS), 4))]
+            picks = [pool[i] for i in sorted(rng.sample(range(NUM_ROLLOUTS), 4))]
         else:
+            ranked = sorted(pool, key=lambda r: r["mean_reverse_kl"], reverse=True)
             tertile = BUCKETS.index(arm)
             picks = ranked[tertile * 4 : (tertile + 1) * 4]
         for r in picks:
@@ -208,11 +216,11 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path) -> None:
                     "example_index": r["example_index"],
                     "rollout_index": r["rollout_index"],
                     "entropy": r.get("student_entropy"),
-                    "mean_reverse_kl": r["mean_reverse_kl"],
-                    "mean_forward_kl": r["mean_forward_kl"],
+                    "mean_reverse_kl": r.get("mean_reverse_kl"),
+                    "mean_forward_kl": r.get("mean_forward_kl"),
                     "correct": bool(meta[key]["correct"]),
-                    "truncated": bool(r["truncated"]),
-                    "response_length": r["response_length"],
+                    "truncated": bool(meta[key]["truncated"]),
+                    "response_length": meta[key]["response_length"],
                 }
             )
     sel_path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,26 +228,34 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path) -> None:
         for row in rows:
             f.write(json.dumps(row) + "\n")
     # Per-bucket per-round composition (USER: report, don't gate): tertile
-    # separation, truncation %, correctness %, mean length.
-    kls = sorted(r["mean_reverse_kl"] for r in rows)
+    # separation, truncation %, correctness %, mean length. KL fields are
+    # absent for the unscored random-arm rounds.
     stats = {
         "arm": arm,
         "round": rnd,
         "n": len(rows),
-        "rkl_min": kls[0],
-        "rkl_median": kls[len(kls) // 2],
-        "rkl_mean": sum(kls) / len(kls),
-        "rkl_max": kls[-1],
-        "fkl_mean": sum(r["mean_forward_kl"] for r in rows) / len(rows),
         "truncated_pct": sum(r["truncated"] for r in rows) / len(rows),
         "correct_pct": sum(r["correct"] for r in rows) / len(rows),
         "mean_length": sum(r["response_length"] for r in rows) / len(rows),
     }
+    kl_line = "unscored"
+    if oracle_dir is not None:
+        kls = sorted(r["mean_reverse_kl"] for r in rows)
+        stats.update(
+            rkl_min=kls[0],
+            rkl_median=kls[len(kls) // 2],
+            rkl_mean=sum(kls) / len(kls),
+            rkl_max=kls[-1],
+            fkl_mean=sum(r["mean_forward_kl"] for r in rows) / len(rows),
+        )
+        kl_line = (
+            f"rkl mean {stats['rkl_mean']:.4f} [{stats['rkl_min']:.4f}.."
+            f"{stats['rkl_max']:.4f}] | fkl mean {stats['fkl_mean']:.4f}"
+        )
     with (RUN_DIR / "bucket_stats.jsonl").open("a") as f:
         f.write(json.dumps(stats) + "\n")
     log(
-        f"{arm} r{rnd}: {stats['n']} rows | rkl mean {stats['rkl_mean']:.4f} "
-        f"[{stats['rkl_min']:.4f}..{stats['rkl_max']:.4f}] | fkl mean {stats['fkl_mean']:.4f} "
+        f"{arm} r{rnd}: {stats['n']} rows | {kl_line} "
         f"| trunc {stats['truncated_pct']:.1%} | correct {stats['correct_pct']:.1%} "
         f"| len {stats['mean_length']:.0f}"
     )
@@ -384,17 +400,19 @@ def drive() -> None:
             terminal = rnd + 1 == TRAIN_ROUNDS
             run_rollout_eval(RUN_DIR, arm, rnd + 1, eval_only=terminal)
             if not terminal:
-                oracle_dir = arm_round(RUN_DIR, arm, rnd + 1) / "oracle"
-                run_score(
-                    arm_round(RUN_DIR, arm, rnd + 1) / "rollouts" / "tokens",
-                    oracle_dir, checkpoint_path(arm, rnd + 1),
-                    expected=128 * NUM_ROLLOUTS,
-                )
-                run_score(
-                    teacher_tokens,
-                    RUN_DIR / "teacher_scoring" / f"round_{rnd + 1:02d}_{arm}",
-                    checkpoint_path(arm, rnd + 1), expected=128 * TEACHER_ROLLOUTS,
-                )
+                oracle_dir = None
+                if arm != "random":  # USER: no scoring passes on the control
+                    oracle_dir = arm_round(RUN_DIR, arm, rnd + 1) / "oracle"
+                    run_score(
+                        arm_round(RUN_DIR, arm, rnd + 1) / "rollouts" / "tokens",
+                        oracle_dir, checkpoint_path(arm, rnd + 1),
+                        expected=128 * NUM_ROLLOUTS,
+                    )
+                    run_score(
+                        teacher_tokens,
+                        RUN_DIR / "teacher_scoring" / f"round_{rnd + 1:02d}_{arm}",
+                        checkpoint_path(arm, rnd + 1), expected=128 * TEACHER_ROLLOUTS,
+                    )
                 write_selection(arm, rnd + 1, oracle_dir)
     log("drive complete")
 
