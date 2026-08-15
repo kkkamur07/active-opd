@@ -549,8 +549,27 @@ Levers, with the user's decisions (relayed 2026-08-14):
    whether the arm curves separate early or late. Plain config value,
    deferring costs nothing.
 
-Remaining before go/no-go: teacher-accuracy gate; flatten-wrapper gradient
-re-verify. (A presence_penalty=1.5 length control was planned to test
+The flatten wrapper itself was gradient-re-verified (the wrapper changes the
+chunk structure, so the earlier unflattened proof did not cover it): fp32,
+2916 valid tokens = 3 chunks of accumulation — loss Δ 7.5e-9, mid-layer grad
+BITWISE identical, tied-embedding grad max|Δ| 5.4e-8 (single-ulp
+accumulation ordering), global grad-norm ratio exactly 1.0.
+
+**Teacher-accuracy gate: PASS (2026-08-14).** Qwen3.5-9B, eval-only
+pipeline run (run_name=teacher_eval, 100 MATH-500 problems x 1 sample,
+the run's exact sampling config and 8192 cap): pass@1 STRICT 0.60 / loose
+0.68, cap_hit 0.47, mean response 6,363 tok. By difficulty level (strict /
+loose / cap_hit): L1 1.00/1.00/0.00 (n=8), L2 0.88/0.94/0.25 (16),
+L3 0.68/0.79/0.37 (19), L4 0.55/0.68/0.50 (22), L5 0.37/0.43/0.71 (35) —
+clean monotone profile, no dead band. Versus the student's strict 0.25:
+~35 points of strict headroom overall, and the teacher both terminates far
+better (cap_hit 0.47 vs 0.81) and answers more — the exact behavior profile
+reverse-KL distillation is supposed to transfer. Teacher accuracy is a
+CEILING for what distillation can reach: at 0.60 strict the ceiling is
+comfortably above everything the arms could plausibly do in 8 rounds.
+
+All launch gates are now passed or retired. GO for smoke3, then the real
+run on a clean smoke3. (A presence_penalty=1.5 length control was planned to test
 whether ADR 0004's penalty removal caused the non-termination; USER
 DECISION 2026-08-14: penalty stays 0.0 for the real run and its
 implementation is retained-but-disabled, so the control was not run — the
@@ -610,6 +629,19 @@ positive result; the primary claim is keyed to strict only.
 as a launch prerequisite. It remains the attribution tool for a null result.)
 
 **Known confounds, stated so results are not over-read**:
+- **vLLM cross-process nondeterminism floor** (measured at round 0, the one
+  point where arms are provably identical): re-evaluating the SAME model in
+  a fresh engine process flips ~1 sample in 64 (smoke8k round-0: `all`
+  0.45313 vs 0.46875 in the other two arms, mean_response_length differing
+  in the decimals proves a genuine recompute) and flipped 1 in 32 once in
+  smoke2 — a per-sample flip rate of roughly 1.5-3% from batch-composition
+  numerics. Round-0 evals are now deduplicated (identical by construction),
+  but every later-round arm comparison crosses processes, so this floor
+  applies: at 2000 samples, ~30-60 flips with roughly balanced direction
+  contribute ~0.3-0.4 points of run-to-run SD — below the ±0.97 sampling SE
+  and inside the 3-point MDE, but a real noise source independent of
+  sampling error. (Verify the dedup from smoke3 artifacts:
+  eval/reused_from.json in arms 2-3 and byte-identical round-0 rows.)
 - `rollout_accuracy` is NOT comparable across rounds: each round rolls out a
   fresh 128-prompt slice, so round-over-round movement mixes model change
   with slice difficulty. Eval avg@4 (fixed MATH-500) is the only
@@ -622,6 +654,76 @@ as a launch prerequisite. It remains the attribution tool for a null result.)
   points (observed 5/32, 5/32, 5/32, 3/32 across genuinely different
   checkpoints). smoke3's config raises this to 400 samples (SE ~1.8) and
   matches the real avg@4 protocol.
+
+## 12. smoke3 results and launch decision
+
+**smoke3 validated the plumbing, NOT the method.** Clean across all of it:
+checkpoint-to-checkpoint train transitions at 8192 with the fused loss
+(losses 0.06-0.22, no drift), round-0 eval dedup fired twice
+(`reused from arm 'entropy_top4'`, 131 s vs 334 s round wall), intermediate
+eval subset, retention, resume, ~7.7k gen tok/s per shard (above the 4.45k
+used in the ~59 h projection — real run likely faster).
+
+**The method result at smoke scale is adverse.** All three arms,
+strict / loose / pass@4 / cap_hit / mean len (100 problems x 4 samples per
+round; r0 is the shared base-model eval, dedup-copied across arms):
+
+| round | entropy_top4 | random_top4 | all |
+|---|---|---|---|
+| r0 base | 0.240 / 0.385 / 0.62 / 0.80 / 7598 | (same, reused) | (same, reused) |
+| r1 | 0.043 / 0.258 / 0.61 / **1.00** / 8192 | 0.335 / 0.390 / 0.62 / 0.71 / 7121 | 0.138 / 0.273 / 0.50 / **0.99** / 8168 |
+| r2 | 0.248 / 0.378 / 0.65 / 0.77 / 7162 | 0.328 / 0.380 / 0.59 / 0.73 / 6748 | 0.263 / 0.338 / 0.54 / 0.87 / 7553 |
+| r3 terminal | **0.113** / 0.205 / 0.45 / 0.91 / 7830 | **0.153** / 0.205 / 0.44 / 0.97 / 8136 | **0.058** / 0.153 / 0.32 / 0.99 / 8176 |
+
+(check_run.py on the finished run: ALL CHECKS PASSED, metrics.jsonl 12
+rows complete.)
+
+Reading of the table:
+
+- **Every arm suffers a termination collapse (cap_hit → ~1.0, strict
+  crashes), but on a DIFFERENT schedule**: entropy at r1 (recovers r2,
+  re-collapses r3), `all` at r1 (partial recovery r2, re-collapses r3),
+  random not until r3. ALL THREE arms end BELOW baseline on the
+  pre-registered primary endpoint, with pass@4 (the mode-collapse
+  monitor) down 0.62 → 0.45/0.44/0.32. The `all` arm — 3x the data per
+  round — has the WORST terminal, so more smoke-scale data alone did not
+  stabilize it.
+- **The arms separate immediately — at round 1 — and with opposite
+  signs**: after one identical-size update, entropy's selected-for-entropy
+  data produced a full collapse (strict −0.20) while random's produced the
+  best number any arm reached (+0.095 strict over baseline, sustained two
+  rounds). `all` (3x the data per round) landed in between. Caveat: smoke3
+  is 8 prompts/round vs the real run's 128, so smoke separation timing is
+  weak evidence for real-run timing — but it says round-1 metrics of the
+  real run are already informative, not burn-in to be ignored.
+- random_top4's two good rounds show the method WORKS in-regime: distilling
+  on-policy at 8192 lifted strict avg@4 by ~9.5 points in one round. The
+  failure mode is the instability, not the objective.
+
+Mechanism is OPEN — candidate stories and their status:
+- data-composition EOS erasure: falsified by entropy's r1→r2 recovery on
+  equally EOS-free (32/32 truncated) training data, and by random's r3
+  collapse from its LEAST-truncated data;
+- first-update optimizer shock: falsified by gradient logs (the
+  collapse-producing round is the calmest, max grad-norm 3.27; the biggest
+  spike, 9.81, precedes the recovery);
+- surviving candidates: termination SATURATION/oscillation (EOS-free data
+  pushes stop probability down when present; teacher stop-mass — teacher
+  cap_hit 0.47 — pulls it up from the floor; small rounds overshoot) and
+  iterated reverse-KL mode-seeking (beta=1.0). Against the latter: answer
+  diversity is FLAT across rounds (9.38/9.12/9.25 distinct answers per 12
+  rollouts). Diagnostic queued: stop-mass probe (student p(stop) at
+  teacher-favored stop positions, base vs each round checkpoint).
+
+**Launch decision (user, 2026-08-15): LAUNCH the real run, with effective
+batch raised 16 → 32** (`gradient_accumulation_steps: 16`, asserted
+composition 2 ranks x 1 x 16). Rationale: smoke3's per-round update is 32
+trajectories / 8 steps at effective batch 4 — the real run trains on 512
+trajectories (top-4 arms) at effective 32, i.e. 16x the data averaged over
+8x larger batches per step, which directly targets the oscillation. This
+is a hypothesis the real run tests, stated here before its results are
+known. No abort rule: per-round metrics are watched and discussed, the
+run is not auto-stopped.
 
 ## Appendix: first-smoke reference numbers (outputs/runs/smoke)
 

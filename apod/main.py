@@ -700,7 +700,12 @@ def _check_fingerprint(cfg: DictConfig, run_dir: Path) -> None:
     path = run_dir / "fingerprint.json"
     if path.exists():
         recorded = json.loads(path.read_text())
-        diffs = {k: (recorded.get(k), v) for k, v in fields.items() if recorded.get(k) != v}
+        # A key the recorded fingerprint predates is backfilled, not a
+        # mismatch: the old run cannot conflict with a knob that did not
+        # exist, and the count-mismatch it guards against still fails loudly
+        # in _merge_eval_summary. Keys that WERE recorded stay hard failures.
+        missing = [k for k in fields if k not in recorded]
+        diffs = {k: (recorded[k], v) for k, v in fields.items() if k in recorded and recorded[k] != v}
         if diffs:
             raise RuntimeError(
                 f"run dir {run_dir} was created under different structural "
@@ -708,6 +713,12 @@ def _check_fingerprint(cfg: DictConfig, run_dir: Path) -> None:
                 f"{diffs}. Use a fresh run_name, or restore the recorded "
                 "values, or delete the run dir for a clean start."
             )
+        if missing:
+            logger.warning(
+                "fingerprint.json predates key(s) {}; backfilling with current values", missing
+            )
+            recorded.update({k: fields[k] for k in missing})
+            path.write_text(json.dumps(recorded, indent=2))
     else:
         path.write_text(json.dumps(fields, indent=2))
 
