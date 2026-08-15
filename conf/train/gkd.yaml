@@ -17,15 +17,22 @@ learning_rate: 2.0e-5    # full-finetune scale (tinker's 1e-4 is LoRA-scale)
 lr_scheduler_type: constant
 warmup_steps: 0
 num_train_epochs: 1
-per_device_train_batch_size: 1   # PER RANK; sequences are up to prompt+8192 tokens
-gradient_accumulation_steps: 16  # 2 DDP ranks x 1 x 16 = effective batch of 32
-                                 # sequences. USER DECISION 2026-08-15: raised
-                                 # from 16 for training stability -- smoke3 at
-                                 # effective 4 oscillated violently (termination
-                                 # collapse), smoke8k at 16 degraded gently;
-                                 # bigger batches average the update over more
-                                 # trajectories. Top-4 arms: 512/32 = 16
-                                 # steps/round; all arm: 1536/32 = 48.
+per_device_train_batch_size: 2   # PER RANK; sequences are up to prompt+8192
+                                 # tokens. USER DECISION 2026-08-15: 2 not 1 --
+                                 # measured peak at micro-batch 1 was 41.2 of
+                                 # 80 GiB with util ~36-56%, and the r0 selected
+                                 # data is ~all-8192 (no long-tail surprise), so
+                                 # micro-batch 2 recovers batch-1
+                                 # underutilization at the same total tokens.
+gradient_accumulation_steps: 8   # 2 DDP ranks x 2 x 8 = effective batch of 32
+                                 # sequences. USER DECISION 2026-08-15: eff 32,
+                                 # raised from 16 for training stability --
+                                 # smoke3 at effective 4 oscillated violently
+                                 # (termination collapse), smoke8k at 16
+                                 # degraded gently; bigger batches average the
+                                 # update over more trajectories. Top-4 arms:
+                                 # 512/32 = 16 steps/round; all arm: 1536/32
+                                 # = 48.
 effective_batch: 32              # ASSERTED by the train stage: world_size x
                                  # per_device x grad_accum must equal this, so
                                  # changing num_gpus without retuning accum
