@@ -52,6 +52,34 @@ def metrics(rows: list[dict]) -> dict | None:
     }
 
 
+def strict_by_problem(rows: list[dict]) -> dict[int, float]:
+    """Per-problem strict avg@n -- the unit for paired tests."""
+
+    by_problem: dict[int, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_problem[r["problem_index"]].append(r)
+    return {
+        idx: sum(s["correct"] and s["has_boxed"] for s in samples) / len(samples)
+        for idx, samples in by_problem.items()
+    }
+
+
+def paired_t(cur: dict[int, float], ref: dict[int, float]) -> str:
+    """Paired per-problem t on strict avg@n; the pairing matters because most
+    problems are unchanged round-to-round and unpaired SEs understate precision."""
+
+    common = sorted(cur.keys() & ref.keys())
+    deltas = [cur[i] - ref[i] for i in common]
+    n = len(deltas)
+    mean = sum(deltas) / n
+    var = sum((d - mean) ** 2 for d in deltas) / (n - 1)
+    se = (var / n) ** 0.5
+    up = sum(d > 0 for d in deltas)
+    down = sum(d < 0 for d in deltas)
+    t = mean / se if se > 0 else float("inf")
+    return f"{mean:+.4f} t={t:.2f} ({up} up/{down} down/{n - up - down} same)"
+
+
 def fmt(m: dict, base: dict | None = None) -> str:
     def delta(key: str) -> str:
         if base is None:
@@ -74,19 +102,28 @@ def main() -> None:
         rounds = sorted((arm_dir / "rounds").glob("round_*"))
         base_rows = read_eval_rows(rounds[0]) if rounds else []
         print(f"\n== {arm_dir.name}")
+        prev_strict: dict[int, float] | None = None
         for round_dir in rounds:
             rows = read_eval_rows(round_dir)
             m = metrics(rows)
             if m is None:
                 print(f"  {round_dir.name}: (no eval rows yet)")
                 continue
+            cur_strict = strict_by_problem(rows)
             if round_dir is rounds[0]:
                 print(f"  {round_dir.name}: {fmt(m)}  [n={m['n_problems']}]")
+                prev_strict = cur_strict
                 continue
             # Baseline restricted to exactly the problems this round evaluated.
             evaluated = {r["problem_index"] for r in rows}
-            base = metrics([r for r in base_rows if r["problem_index"] in evaluated])
+            base_sub = [r for r in base_rows if r["problem_index"] in evaluated]
+            base = metrics(base_sub)
             print(f"  {round_dir.name}: {fmt(m, base)}  [n={m['n_problems']}, deltas vs r0 same problems]")
+            line = f"      paired strict vs r0: {paired_t(cur_strict, strict_by_problem(base_sub))}"
+            if prev_strict is not None:
+                line += f"  |  vs prev round: {paired_t(cur_strict, prev_strict)}"
+            print(line)
+            prev_strict = cur_strict
 
 
 if __name__ == "__main__":
