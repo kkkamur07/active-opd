@@ -59,8 +59,10 @@ use_liger_kernel: true   # chunked LigerFusedLinearJSDLoss: the divergence is
 teacher_dtype: bfloat16  # becomes teacher_model_init_kwargs={"dtype": ...};
                          # the "dtype" key is MANDATORY once kwargs are passed
                          # (gkd_trainer.py:182-186 indexes it unconditionally)
-max_length: 16384        # pre-tokenized rows bypass collator truncation, but
-                         # set it anyway so the 1024 default can never bite
+max_length: 24576        # pre-tokenized rows bypass collator truncation, but
+                         # set it anyway so the 1024 default can never bite.
+                         # Raised with the 16384 sampling cap (prompt + 16384
+                         # response must fit).
 
 # --- bookkeeping ---
 logging_steps: 1

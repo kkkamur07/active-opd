@@ -14,4 +14,10 @@ presence_penalty: 0.0
 fast_presence_penalty: false
 # Hard cap per trajectory. Cap-hit trajectories are kept for training and
 # graded incorrect for reporting (ADR 0002).
-max_new_tokens: 8192
+# USER DECISION 2026-08-15: 8192 -> 16384 for the NEXT run (the apod run
+# completed at 8192; its resolved_config is untouched). Motivated by the 24k
+# diagnostic: only 9.4% of traces finish under 8192, finished median 16,282.
+# Implications not yet measured at 16384: train activation memory roughly
+# doubles per sequence (micro-batch 4 at 8192 peaked 59.2/80 GiB -- expect to
+# drop micro-batch back to 2), and rollout/eval wall time grows with length.
+max_new_tokens: 16384

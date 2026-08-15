@@ -1,13 +1,21 @@
 """Oracle-KL diagnostic (todo: run ONCE, standalone; USER 2026-08-15: run
 after the apod run finishes).
 
-Computes the ACTUAL per-trajectory reverse KL(student || teacher) -- the exact
-quantity the GKD objective (beta=1.0) minimizes -- for every stored round-0
-rollout, then asks whether the cheap selection statistic (mean token entropy)
-ranks trajectories the way the oracle does. This is the attribution tool for
-the entropy-vs-random null: if entropy-top4 and KL-top4 pick nearly the same
-trajectories, the selection PREMISE is weak; if they pick differently, mean
-entropy is the wrong proxy and a better statistic is the fix.
+Computes BOTH divergence directions per stored round-0 rollout (USER
+2026-08-15: "do the oracle experiment with both reverse and forward KL so
+that we can genuinely understand if there is a selection effect"):
+  - reverse KL(student || teacher): the exact quantity the beta=1.0 GKD
+    objective minimizes -- upweights positions where the student is
+    confidently wrong under the teacher; the training-oracle score.
+  - forward KL(teacher || student): mass-covering direction -- upweights
+    positions where the teacher has mass the student lacks (coverage gaps).
+Both come from the same two forward passes, so forward KL is free.
+
+The attribution question for the entropy-vs-random null: if entropy-top4 and
+KL-top4 pick nearly the same trajectories, the selection PREMISE is weak; if
+they pick differently, mean entropy is the wrong proxy and a better statistic
+is the fix. Disagreement BETWEEN the two KL directions additionally tells us
+whether any selection effect depends on the divergence direction.
 
 Per trajectory it writes: mean reverse KL over response tokens, plus the
 stored entropy/logprob joined from the entropy stage. Analysis (per-prompt
@@ -97,15 +105,18 @@ def compute(args) -> None:
                     s_logits = student(input_ids=ids).logits[0]
                 # Reverse KL at response positions: prediction at position t-1
                 # scores the token emitted at t, so slice [plen-1, plen+rlen-1).
-                kl_sum, n = 0.0, 0
+                rkl_sum, fkl_sum, n = 0.0, 0.0, 0
                 for lo in range(plen - 1, plen + rlen - 1, POSITION_CHUNK):
                     hi = min(lo + POSITION_CHUNK, plen + rlen - 1)
                     lp_s = torch.log_softmax(s_logits[lo:hi].float(), dim=-1)
                     lp_t = torch.log_softmax(t_logits[lo:hi].float(), dim=-1)
-                    kl = (lp_s.exp() * (lp_s - lp_t)).sum(-1)  # KL(S||T) per position
-                    kl_sum += float(kl.sum())
-                    n += kl.shape[0]
-                    del lp_s, lp_t, kl
+                    diff = lp_s - lp_t
+                    rkl = (lp_s.exp() * diff).sum(-1)   # KL(S||T) per position
+                    fkl = (lp_t.exp() * -diff).sum(-1)  # KL(T||S) per position
+                    rkl_sum += float(rkl.sum())
+                    fkl_sum += float(fkl.sum())
+                    n += rkl.shape[0]
+                    del lp_s, lp_t, diff, rkl, fkl
                 del t_logits, s_logits
                 torch.cuda.empty_cache()
                 f.write(
@@ -113,7 +124,8 @@ def compute(args) -> None:
                         {
                             "example_index": example_index,
                             "rollout_index": k,
-                            "mean_reverse_kl": kl_sum / max(n, 1),
+                            "mean_reverse_kl": rkl_sum / max(n, 1),
+                            "mean_forward_kl": fkl_sum / max(n, 1),
                             "response_length": rlen,
                             "truncated": bool(truncated[k]),
                         }
@@ -141,13 +153,14 @@ def analyze(args) -> None:
         r["entropy"] = ent.get((r["example_index"], r["rollout_index"]))
         by_example[r["example_index"]].append(r)
 
-    kls = np.array([r["mean_reverse_kl"] for r in oracle])
     print(f"n trajectories: {len(oracle)}  (examples: {len(by_example)})")
-    print(
-        "reverse KL distribution: "
-        + "  ".join(f"p{p}={np.percentile(kls, p):.4f}" for p in (5, 25, 50, 75, 95))
-        + f"  mean={kls.mean():.4f}"
-    )
+    for key in ("mean_reverse_kl", "mean_forward_kl"):
+        kls = np.array([r[key] for r in oracle])
+        print(
+            f"{key} distribution: "
+            + "  ".join(f"p{p}={np.percentile(kls, p):.4f}" for p in (5, 25, 50, 75, 95))
+            + f"  mean={kls.mean():.4f}"
+        )
 
     # Per-example Spearman rank correlation entropy vs oracle KL, and top-4
     # selection overlap between the two statistics (and expected-random 4/12).
@@ -159,26 +172,41 @@ def analyze(args) -> None:
         denom = np.sqrt((rx**2).sum() * (ry**2).sum())
         return float((rx * ry).sum() / denom) if denom > 0 else float("nan")
 
-    rhos, overlaps = [], []
+    pairs = [
+        ("entropy", "mean_reverse_kl"),
+        ("entropy", "mean_forward_kl"),
+        ("mean_reverse_kl", "mean_forward_kl"),
+    ]
+    rhos = {p: [] for p in pairs}
+    overlaps = {p: [] for p in pairs}
     for rows in by_example.values():
         if len(rows) < 2 or any(r["entropy"] is None for r in rows):
             continue
-        e = [r["entropy"] for r in rows]
-        k = [r["mean_reverse_kl"] for r in rows]
-        rho = spearman(e, k)
-        if not np.isnan(rho):
-            rhos.append(rho)
-        top_e = set(np.argsort(e)[::-1][:4])
-        top_k = set(np.argsort(k)[::-1][:4])
-        overlaps.append(len(top_e & top_k))
-    print(
-        f"per-example Spearman(entropy, oracle KL): mean {np.mean(rhos):+.3f}  "
-        f"median {np.median(rhos):+.3f}  (n={len(rhos)})"
-    )
-    print(
-        f"top-4 overlap entropy-vs-oracle: mean {np.mean(overlaps):.2f}/4  "
-        f"(random baseline 1.33/4)"
-    )
+        vals = {
+            "entropy": [r["entropy"] for r in rows],
+            "mean_reverse_kl": [r["mean_reverse_kl"] for r in rows],
+            "mean_forward_kl": [r["mean_forward_kl"] for r in rows],
+        }
+        for a, b in pairs:
+            rho = spearman(vals[a], vals[b])
+            if not np.isnan(rho):
+                rhos[(a, b)].append(rho)
+            top_a = set(np.argsort(vals[a])[::-1][:4])
+            top_b = set(np.argsort(vals[b])[::-1][:4])
+            overlaps[(a, b)].append(len(top_a & top_b))
+    for a, b in pairs:
+        print(
+            f"{a} vs {b}: Spearman mean {np.mean(rhos[(a, b)]):+.3f} "
+            f"median {np.median(rhos[(a, b)]):+.3f}  |  top-4 overlap "
+            f"{np.mean(overlaps[(a, b)]):.2f}/4 (random 1.33/4)  (n={len(overlaps[(a, b)])})"
+        )
+    # Termination link (hypothesis #1): do the scores differ for cap-hit vs
+    # finished trajectories?
+    for key in ("mean_reverse_kl", "mean_forward_kl", "entropy"):
+        t = [r[key] for r in oracle if r["truncated"] and r.get(key) is not None]
+        fin = [r[key] for r in oracle if not r["truncated"] and r.get(key) is not None]
+        if t and fin:
+            print(f"{key}: cap-hit mean {np.mean(t):.4f} (n={len(t)})  finished mean {np.mean(fin):.4f} (n={len(fin)})")
 
 
 def main() -> None:
