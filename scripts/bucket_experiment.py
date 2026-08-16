@@ -19,8 +19,9 @@ Locked design:
   shared scored pool; from round 1 each KL arm generates and re-scores its
   own. The random arm's later rounds are NOT scored (USER: "drop the scoring
   on random arm") -- it just rolls out, samples 4, trains.
-- 4 training rounds per arm (0..3) + terminal eval (USER: "make the rounds
-  to 4"); identical hyperparameters, micro-batch constant across all arms;
+- 2 training rounds per arm (0..1) + terminal eval (USER 2026-08-16:
+  "make it 2 rounds please", reduced mid-run from 4);
+  identical hyperparameters, micro-batch constant across all arms;
   eval 500x4 at 16384 every round; fresh 16384 base eval (the shared
   round-0 eval) is the baseline.
 - No go/no-go gate on tertile separation (USER: "don't agree with gates just
@@ -56,7 +57,9 @@ RUN_DIR = ROOT / "outputs/runs/oracle16k"
 TEACHER_RUN = ROOT / "outputs/runs/oracle16k_teacher"
 BUCKETS = ("kl_high", "kl_mid", "kl_low")
 ARMS = BUCKETS + ("random",)  # random-4-of-12 control, re-sampled each round
-TRAIN_ROUNDS = 4  # trains at rounds 0..3; round 4 is the terminal eval-only
+TRAIN_ROUNDS = 2  # trains at rounds 0..1; round 2 is the terminal eval-only
+                  # (USER 2026-08-16 mid-run: "make it 2 rounds please",
+                  # down from 4)
 NUM_ROLLOUTS = 12
 TEACHER_ROLLOUTS = 4
 
