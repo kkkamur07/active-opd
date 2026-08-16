@@ -56,7 +56,11 @@ SOURCE_RUN = ROOT / "outputs/runs/apod"
 RUN_DIR = ROOT / "outputs/runs/oracle16k"
 TEACHER_RUN = ROOT / "outputs/runs/oracle16k_teacher"
 BUCKETS = ("kl_high", "kl_mid", "kl_low")
-ARMS = BUCKETS + ("random",)  # random-4-of-12 control, re-sampled each round
+ARMS = BUCKETS + ("random", "all")
+# Controls: "random" = 4-of-12 per prompt, re-sampled each round;
+# "all" = every rollout, no selection (1536 rows, 48 steps/round -- USER
+# 2026-08-16: "add two rounds of training on all, not categorizing on
+# divergence"). Neither is KL-scored after the shared round 0.
 TRAIN_ROUNDS = 2  # trains at rounds 0..1; round 2 is the terminal eval-only
                   # (USER 2026-08-16 mid-run: "make it 2 rounds please",
                   # down from 4)
@@ -194,7 +198,7 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
             for r in read_jsonl(shard):
                 by_example[r["example_index"]].append(r)
     else:
-        assert arm == "random", f"{arm} requires a scored pool"
+        assert arm in ("random", "all"), f"{arm} requires a scored pool"
         for (example_index, _), r in sorted(meta.items()):
             by_example[example_index].append(r)
     rows = []
@@ -203,7 +207,9 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
         assert len(pool) == NUM_ROLLOUTS, (
             f"example {example_index}: {len(pool)} rollouts, expected {NUM_ROLLOUTS}"
         )
-        if arm == "random":
+        if arm == "all":
+            picks = pool
+        elif arm == "random":
             # Control: random 4 of 12, re-sampled each round. Deterministic
             # seed per (round, example) so resume replays the same draw.
             rng = random.Random(f"oracle16k-r{rnd}-e{example_index}")
@@ -404,7 +410,7 @@ def drive() -> None:
             run_rollout_eval(RUN_DIR, arm, rnd + 1, eval_only=terminal)
             if not terminal:
                 oracle_dir = None
-                if arm != "random":  # USER: no scoring passes on the control
+                if arm in BUCKETS:  # USER: no scoring passes on the controls
                     oracle_dir = arm_round(RUN_DIR, arm, rnd + 1) / "oracle"
                     run_score(
                         arm_round(RUN_DIR, arm, rnd + 1) / "rollouts" / "tokens",
