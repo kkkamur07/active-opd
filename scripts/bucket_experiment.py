@@ -254,9 +254,13 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
                 }
             )
     sel_path.parent.mkdir(parents=True, exist_ok=True)
-    with sel_path.open("w") as f:
+    # Atomic: bare existence of selected.jsonl is the resume done-marker, so
+    # a kill mid-write must never leave a partial file behind.
+    tmp = sel_path.with_suffix(".jsonl.tmp")
+    with tmp.open("w") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
+    os.replace(tmp, sel_path)
     # Per-bucket per-round composition (USER: report, don't gate): tertile
     # separation, truncation %, correctness %, mean length. KL fields are
     # absent for the unscored random-arm rounds.

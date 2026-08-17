@@ -71,8 +71,11 @@ def paired_t(cur: dict[int, float], ref: dict[int, float]) -> str:
     common = sorted(cur.keys() & ref.keys())
     deltas = [cur[i] - ref[i] for i in common]
     n = len(deltas)
+    if n == 0:
+        # e.g. probe run dirs whose round_00 holds only a checkpoint symlink
+        return "n/a (no overlapping problems in reference round)"
     mean = sum(deltas) / n
-    var = sum((d - mean) ** 2 for d in deltas) / (n - 1)
+    var = sum((d - mean) ** 2 for d in deltas) / (n - 1) if n > 1 else 0.0
     se = (var / n) ** 0.5
     up = sum(d > 0 for d in deltas)
     down = sum(d < 0 for d in deltas)
