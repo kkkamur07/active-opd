@@ -101,6 +101,11 @@ def checkpoint_path(arm: str, rnd: int) -> str:
 
 # --- build ------------------------------------------------------------------
 
+LR_OVERRIDE: float | None = None  # --lr: round-3 extension runs at the LR the
+                                  # probe verdict picks (USER: "agreed on the
+                                  # ordering" -- LR conditional on probe)
+
+
 def _write_config(dst: Path, *, student_id: str, num_rollouts: int, seed: int | None = None) -> None:
     cfg = OmegaConf.load(SOURCE_RUN / "resolved_config.yaml")
     cfg.model.student_id = student_id
@@ -108,6 +113,8 @@ def _write_config(dst: Path, *, student_id: str, num_rollouts: int, seed: int | 
     if seed is not None:
         cfg.seed = seed
         cfg.train.seed = seed  # resolved_config stores ${seed} resolved
+    if LR_OVERRIDE is not None:
+        cfg.train.learning_rate = LR_OVERRIDE
     cfg.sampling.max_new_tokens = 16384
     cfg.engine.max_model_len = 24576
     cfg.train.max_length = 24576
@@ -468,7 +475,13 @@ def main() -> None:
     group.add_argument("--report", action="store_true")
     group.add_argument("--replicate", action="store_true",
                        help="seed-1042 one-round rerun of the 4 bucket arms")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="override train LR for this (re)launch, e.g. 5e-6 "
+                             "for the round-3 extension per the probe verdict")
     args = parser.parse_args()
+    if args.lr is not None:
+        global LR_OVERRIDE
+        LR_OVERRIDE = args.lr
     if args.replicate:
         REPLICATE = True
         RUN_DIR = ROOT / "outputs/runs/oracle16k_seed2"
