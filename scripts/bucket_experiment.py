@@ -34,6 +34,13 @@ Usage:
   uv run python scripts/bucket_experiment.py --build   # run dirs + configs
   uv run python scripts/bucket_experiment.py --drive   # everything, resumable
   uv run python scripts/bucket_experiment.py --report
+  uv run python scripts/bucket_experiment.py --replicate
+      # USER 2026-08-17: different-seed replication of the round-1
+      # inverted-U (mid > random > high > low). Fresh run dir at seed 1042:
+      # new base pool 128x12 + base eval, scored, tertiled, the four
+      # original arms trained ONE round each + terminal evals. No teacher
+      # rollouts (reverse KL alone forms buckets), no micro re-probe, no
+      # "all" arm.
 """
 
 from __future__ import annotations
@@ -94,10 +101,13 @@ def checkpoint_path(arm: str, rnd: int) -> str:
 
 # --- build ------------------------------------------------------------------
 
-def _write_config(dst: Path, *, student_id: str, num_rollouts: int) -> None:
+def _write_config(dst: Path, *, student_id: str, num_rollouts: int, seed: int | None = None) -> None:
     cfg = OmegaConf.load(SOURCE_RUN / "resolved_config.yaml")
     cfg.model.student_id = student_id
     cfg.rollout.num_rollouts = num_rollouts
+    if seed is not None:
+        cfg.seed = seed
+        cfg.train.seed = seed  # resolved_config stores ${seed} resolved
     cfg.sampling.max_new_tokens = 16384
     cfg.engine.max_model_len = 24576
     cfg.train.max_length = 24576
@@ -378,12 +388,20 @@ def run_micro_probe() -> None:
 
 # --- drive ------------------------------------------------------------------
 
-def drive() -> None:
-    build()
+REPLICATE = False  # set by --replicate: seed-1042 rerun, no teacher/probe
 
-    # Teacher block, once: 128 x 4 teacher rollouts + teacher 500x4 eval @16384.
-    run_rollout_eval(TEACHER_RUN, "all", 0, eval_only=False)
-    teacher_tokens = arm_round(TEACHER_RUN, "all", 0) / "rollouts" / "tokens"
+
+def drive() -> None:
+    teacher_tokens = None
+    if REPLICATE:
+        _write_config(RUN_DIR, student_id="Qwen/Qwen3.5-2B",
+                      num_rollouts=NUM_ROLLOUTS, seed=1042)
+        log(f"replication config written: {RUN_DIR} (seed 1042)")
+    else:
+        build()
+        # Teacher block, once: 128x4 teacher rollouts + teacher 500x4 eval.
+        run_rollout_eval(TEACHER_RUN, "all", 0, eval_only=False)
+        teacher_tokens = arm_round(TEACHER_RUN, "all", 0) / "rollouts" / "tokens"
 
     # Shared round-0 block: one pool, scored once, partitioned three ways.
     run_rollout_eval(RUN_DIR, ARMS[0], 0, eval_only=False)
@@ -394,16 +412,19 @@ def drive() -> None:
         arm_round(RUN_DIR, BUCKETS[0], 0) / "rollouts" / "tokens",
         r0_oracle, checkpoint_path(BUCKETS[0], 0), expected=128 * NUM_ROLLOUTS,
     )
-    run_score(
-        teacher_tokens, RUN_DIR / "teacher_scoring" / "round_00_base",
-        checkpoint_path(BUCKETS[0], 0), expected=128 * TEACHER_ROLLOUTS,
-    )
+    if not REPLICATE:
+        run_score(
+            teacher_tokens, RUN_DIR / "teacher_scoring" / "round_00_base",
+            checkpoint_path(BUCKETS[0], 0), expected=128 * TEACHER_ROLLOUTS,
+        )
     for arm in ARMS:
         write_selection(arm, 0, r0_oracle)
 
     # Micro-batch probe on the real 16384 data BEFORE any real train step;
     # locks per_device/accum into resolved_config for every arm and round.
-    run_micro_probe()
+    # (Replication inherits the main run's measured micro 2 via the config.)
+    if not REPLICATE:
+        run_micro_probe()
 
     # Iterative rounds, re-scored per arm from its current policy.
     for rnd in range(TRAIN_ROUNDS):
@@ -421,11 +442,12 @@ def drive() -> None:
                         oracle_dir, checkpoint_path(arm, rnd + 1),
                         expected=128 * NUM_ROLLOUTS,
                     )
-                    run_score(
-                        teacher_tokens,
-                        RUN_DIR / "teacher_scoring" / f"round_{rnd + 1:02d}_{arm}",
-                        checkpoint_path(arm, rnd + 1), expected=128 * TEACHER_ROLLOUTS,
-                    )
+                    if not REPLICATE:
+                        run_score(
+                            teacher_tokens,
+                            RUN_DIR / "teacher_scoring" / f"round_{rnd + 1:02d}_{arm}",
+                            checkpoint_path(arm, rnd + 1), expected=128 * TEACHER_ROLLOUTS,
+                        )
                 write_selection(arm, rnd + 1, oracle_dir)
     log("drive complete")
 
@@ -438,13 +460,22 @@ def report() -> None:
 
 
 def main() -> None:
+    global REPLICATE, RUN_DIR, TRAIN_ROUNDS, ARMS
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--build", action="store_true")
     group.add_argument("--drive", action="store_true")
     group.add_argument("--report", action="store_true")
+    group.add_argument("--replicate", action="store_true",
+                       help="seed-1042 one-round rerun of the 4 bucket arms")
     args = parser.parse_args()
-    if args.build:
+    if args.replicate:
+        REPLICATE = True
+        RUN_DIR = ROOT / "outputs/runs/oracle16k_seed2"
+        TRAIN_ROUNDS = 1
+        ARMS = BUCKETS + ("random",)
+        drive()
+    elif args.build:
         build()
     elif args.drive:
         drive()
