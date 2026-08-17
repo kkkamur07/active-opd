@@ -61,9 +61,13 @@ ARMS = BUCKETS + ("random", "all")
 # "all" = every rollout, no selection (1536 rows, 48 steps/round -- USER
 # 2026-08-16: "add two rounds of training on all, not categorizing on
 # divergence"). Neither is KL-scored after the shared round 0.
-TRAIN_ROUNDS = 2  # trains at rounds 0..1; round 2 is the terminal eval-only
-                  # (USER 2026-08-16 mid-run: "make it 2 rounds please",
-                  # down from 4)
+TRAIN_ROUNDS = 3  # trains at rounds 0..2; round 3 is the terminal eval-only.
+                  # History: 4 -> 2 (USER 2026-08-16 "make it 2 rounds") ->
+                  # 3 (USER 2026-08-17 "run round 3 as well", after every arm
+                  # regressed in round 2: does it continue, plateau, or
+                  # recover?). On resume, the banked round-2 eval-only rounds
+                  # gain rollouts/scoring/selection/train; round 3 is the new
+                  # terminal.
 NUM_ROLLOUTS = 12
 TEACHER_ROLLOUTS = 4
 
