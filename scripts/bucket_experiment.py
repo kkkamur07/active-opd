@@ -248,7 +248,8 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
                     "entropy": r.get("student_entropy"),
                     "mean_reverse_kl": r.get("mean_reverse_kl"),
                     "mean_forward_kl": r.get("mean_forward_kl"),
-                    "correct": bool(meta[key]["correct"]),
+                    # USER POLICY 2026-08-18: no \boxed => incorrect (strict).
+                    "correct": bool(meta[key]["correct"]) and bool(meta[key].get("has_boxed")),
                     "truncated": bool(meta[key]["truncated"]),
                     "response_length": meta[key]["response_length"],
                 }

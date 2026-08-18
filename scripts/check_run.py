@@ -129,8 +129,10 @@ def check_selection(rdir: Path, cfg, arm: str) -> None:
         fail(f"{rdir}: {len(rows)} selected rows, expected {num_prompts * per_prompt} for arm {arm}")
     keys = {"example_index", "rollout_index", "entropy", "correct", "truncated", "response_length"}
     for r in rows:
-        if set(r) != keys:
-            fail(f"{rdir}: selected row keys {sorted(r)} != contract {sorted(keys)}")
+        # Contract keys must be present; extras allowed (the oracle16k
+        # experiment adds mean_reverse_kl / mean_forward_kl).
+        if not keys <= set(r):
+            fail(f"{rdir}: selected row keys {sorted(r)} missing from contract {sorted(keys)}")
     real = {(t["example_index"], t["rollout_index"]) for t in read_shards(rdir / "rollouts", "trajectories.shard*.jsonl")}
     ghosts = [(r["example_index"], r["rollout_index"]) for r in rows if (r["example_index"], r["rollout_index"]) not in real]
     if ghosts:
@@ -188,10 +190,13 @@ def check_eval(rdir: Path, cfg) -> None:
             fail(f"{rdir}: eval {key}={summary[key]} outside [0, 1]")
     if summary["pass_at_n"] < summary["avg_at_n"]:
         fail(f"{rdir}: pass@n {summary['pass_at_n']} < avg@n {summary['avg_at_n']} — impossible")
+    # USER POLICY 2026-08-18: no \boxed => incorrect. Strict is THE metric;
+    # loose kept in parentheses as a diagnostic only.
     ok(
-        f"eval: {len(rows)} rows, avg@{summary['num_samples']}={summary['avg_at_n']:.3f}, "
-        f"pass@{summary['num_samples']}={summary['pass_at_n']:.3f}, "
-        f"cap_hit={summary['cap_hit_rate']:.2f}"
+        f"eval: {len(rows)} rows, strict_avg@{summary['num_samples']}={summary['strict_avg_at_n']:.3f}, "
+        f"strict_pass@{summary['num_samples']}={summary['strict_pass_at_n']:.3f}, "
+        f"cap_hit={summary['cap_hit_rate']:.2f} "
+        f"(loose avg {summary['avg_at_n']:.3f} / pass {summary['pass_at_n']:.3f})"
     )
 
 
