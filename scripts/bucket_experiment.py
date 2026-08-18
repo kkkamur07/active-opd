@@ -489,7 +489,11 @@ def main() -> None:
     if args.replicate:
         REPLICATE = True
         RUN_DIR = ROOT / "outputs/runs/oracle16k_seed2"
-        TRAIN_ROUNDS = 1
+        TRAIN_ROUNDS = 2  # was 1; USER 2026-08-18 "try running round 2 of
+                          # 1042 as well" -- does seed-1042's kl_low (which
+                          # avoided the r1 termination degradation, cap 0.482)
+                          # also dodge the round-2 spiral, and does the
+                          # universal selected-arm regression reproduce?
         ARMS = BUCKETS + ("random",)
         drive()
     elif args.build:
