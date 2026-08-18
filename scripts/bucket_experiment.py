@@ -117,12 +117,13 @@ def _write_config(dst: Path, *, student_id: str, num_rollouts: int,
     if LR_OVERRIDE is not None:
         cfg.train.learning_rate = LR_OVERRIDE
     cfg.sampling.max_new_tokens = cap
-    if cap == 8192:
-        # Truncated-regime rerun (USER 2026-08-18: "run the experiment at
-        # 8192 also"). Micro 4 is the measured-safe setting at this cap
-        # (59.2 GiB peak, apod run).
-        cfg.engine.max_model_len = 16384
-        cfg.train.max_length = 16384
+    if cap < 16384:
+        # Truncated-regime reruns (USER 2026-08-18: caps 8192 and 4096 —
+        # a 3-point cap sweep of the selection effect). Micro 4 is the
+        # measured-safe setting at 8192 (59.2 GiB peak, apod run) and has
+        # ample headroom at 4096.
+        cfg.engine.max_model_len = cap * 2
+        cfg.train.max_length = cap * 2
         cfg.train.per_device_train_batch_size = 4
         cfg.train.gradient_accumulation_steps = 4
     else:
@@ -495,6 +496,9 @@ def main() -> None:
     group.add_argument("--at8192", action="store_true",
                        help="truncated-regime rerun: 4 bucket arms at cap 8192, "
                             "1 round + terminal (USER 2026-08-18)")
+    group.add_argument("--at4096", action="store_true",
+                       help="third cap point: 4 bucket arms at cap 4096, "
+                            "1 round + terminal (USER 2026-08-18)")
     parser.add_argument("--lr", type=float, default=None,
                         help="override train LR for this (re)launch, e.g. 5e-6 "
                              "for the round-3 extension per the probe verdict")
@@ -513,10 +517,10 @@ def main() -> None:
                           # universal selected-arm regression reproduce?
         ARMS = BUCKETS + ("random",)
         drive()
-    elif args.at8192:
+    elif args.at8192 or args.at4096:
         REPLICATE = True  # same skips: no teacher set, no micro re-probe
-        RUN_DIR = ROOT / "outputs/runs/oracle8k"
-        CAP = 8192
+        CAP = 8192 if args.at8192 else 4096
+        RUN_DIR = ROOT / ("outputs/runs/oracle8k" if args.at8192 else "outputs/runs/oracle4k")
         TRAIN_ROUNDS = 1
         ARMS = BUCKETS + ("random",)
         drive()
