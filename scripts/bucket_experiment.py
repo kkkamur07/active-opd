@@ -521,7 +521,10 @@ def main() -> None:
         REPLICATE = True  # same skips: no teacher set, no micro re-probe
         CAP = 8192 if args.at8192 else 4096
         RUN_DIR = ROOT / ("outputs/runs/oracle8k" if args.at8192 else "outputs/runs/oracle4k")
-        TRAIN_ROUNDS = 1
+        TRAIN_ROUNDS = 2  # was 1; USER 2026-08-18: "see whether this
+                          # replicates across different context lengths" --
+                          # the peak-then-regress trajectory needs the
+                          # second trained round at every cap point.
         ARMS = BUCKETS + ("random",)
         drive()
     elif args.build:
