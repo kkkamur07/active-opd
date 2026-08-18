@@ -106,7 +106,8 @@ LR_OVERRIDE: float | None = None  # --lr: round-3 extension runs at the LR the
                                   # ordering" -- LR conditional on probe)
 
 
-def _write_config(dst: Path, *, student_id: str, num_rollouts: int, seed: int | None = None) -> None:
+def _write_config(dst: Path, *, student_id: str, num_rollouts: int,
+                  seed: int | None = None, cap: int = 16384) -> None:
     cfg = OmegaConf.load(SOURCE_RUN / "resolved_config.yaml")
     cfg.model.student_id = student_id
     cfg.rollout.num_rollouts = num_rollouts
@@ -115,11 +116,20 @@ def _write_config(dst: Path, *, student_id: str, num_rollouts: int, seed: int | 
         cfg.train.seed = seed  # resolved_config stores ${seed} resolved
     if LR_OVERRIDE is not None:
         cfg.train.learning_rate = LR_OVERRIDE
-    cfg.sampling.max_new_tokens = 16384
-    cfg.engine.max_model_len = 24576
-    cfg.train.max_length = 24576
-    cfg.train.per_device_train_batch_size = 2
-    cfg.train.gradient_accumulation_steps = 8
+    cfg.sampling.max_new_tokens = cap
+    if cap == 8192:
+        # Truncated-regime rerun (USER 2026-08-18: "run the experiment at
+        # 8192 also"). Micro 4 is the measured-safe setting at this cap
+        # (59.2 GiB peak, apod run).
+        cfg.engine.max_model_len = 16384
+        cfg.train.max_length = 16384
+        cfg.train.per_device_train_batch_size = 4
+        cfg.train.gradient_accumulation_steps = 4
+    else:
+        cfg.engine.max_model_len = 24576
+        cfg.train.max_length = 24576
+        cfg.train.per_device_train_batch_size = 2
+        cfg.train.gradient_accumulation_steps = 8
     dst.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(config=cfg, f=dst / "resolved_config.yaml", resolve=True)
     if not (dst / "pool").exists():
@@ -400,15 +410,17 @@ def run_micro_probe() -> None:
 
 # --- drive ------------------------------------------------------------------
 
-REPLICATE = False  # set by --replicate: seed-1042 rerun, no teacher/probe
+REPLICATE = False  # variant modes (--replicate / --at8192): no teacher/probe
+SEED_OVERRIDE: int | None = None
+CAP = 16384
 
 
 def drive() -> None:
     teacher_tokens = None
     if REPLICATE:
         _write_config(RUN_DIR, student_id="Qwen/Qwen3.5-2B",
-                      num_rollouts=NUM_ROLLOUTS, seed=1042)
-        log(f"replication config written: {RUN_DIR} (seed 1042)")
+                      num_rollouts=NUM_ROLLOUTS, seed=SEED_OVERRIDE, cap=CAP)
+        log(f"variant config written: {RUN_DIR} (seed {SEED_OVERRIDE or 'base'}, cap {CAP})")
     else:
         build()
         # Teacher block, once: 128x4 teacher rollouts + teacher 500x4 eval.
@@ -472,7 +484,7 @@ def report() -> None:
 
 
 def main() -> None:
-    global REPLICATE, RUN_DIR, TRAIN_ROUNDS, ARMS
+    global REPLICATE, RUN_DIR, TRAIN_ROUNDS, ARMS, SEED_OVERRIDE, CAP
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--build", action="store_true")
@@ -480,6 +492,9 @@ def main() -> None:
     group.add_argument("--report", action="store_true")
     group.add_argument("--replicate", action="store_true",
                        help="seed-1042 one-round rerun of the 4 bucket arms")
+    group.add_argument("--at8192", action="store_true",
+                       help="truncated-regime rerun: 4 bucket arms at cap 8192, "
+                            "1 round + terminal (USER 2026-08-18)")
     parser.add_argument("--lr", type=float, default=None,
                         help="override train LR for this (re)launch, e.g. 5e-6 "
                              "for the round-3 extension per the probe verdict")
@@ -490,11 +505,19 @@ def main() -> None:
     if args.replicate:
         REPLICATE = True
         RUN_DIR = ROOT / "outputs/runs/oracle16k_seed2"
+        SEED_OVERRIDE = 1042
         TRAIN_ROUNDS = 2  # was 1; USER 2026-08-18 "try running round 2 of
                           # 1042 as well" -- does seed-1042's kl_low (which
                           # avoided the r1 termination degradation, cap 0.482)
                           # also dodge the round-2 spiral, and does the
                           # universal selected-arm regression reproduce?
+        ARMS = BUCKETS + ("random",)
+        drive()
+    elif args.at8192:
+        REPLICATE = True  # same skips: no teacher set, no micro re-probe
+        RUN_DIR = ROOT / "outputs/runs/oracle8k"
+        CAP = 8192
+        TRAIN_ROUNDS = 1
         ARMS = BUCKETS + ("random",)
         drive()
     elif args.build:
