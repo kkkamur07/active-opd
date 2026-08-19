@@ -510,21 +510,19 @@ def main() -> None:
         REPLICATE = True
         RUN_DIR = ROOT / "outputs/runs/oracle16k_seed2"
         SEED_OVERRIDE = 1042
-        TRAIN_ROUNDS = 2  # was 1; USER 2026-08-18 "try running round 2 of
-                          # 1042 as well" -- does seed-1042's kl_low (which
-                          # avoided the r1 termination degradation, cap 0.482)
-                          # also dodge the round-2 spiral, and does the
-                          # universal selected-arm regression reproduce?
+        TRAIN_ROUNDS = 3  # 1 -> 2 -> 3 (USER 2026-08-19 "do three rounds",
+                          # after the main run's round-3 oscillation: the
+                          # dip-then-recover pattern needs the third trained
+                          # round at the second seed too)
         ARMS = BUCKETS + ("random",)
         drive()
     elif args.at8192 or args.at4096:
         REPLICATE = True  # same skips: no teacher set, no micro re-probe
         CAP = 8192 if args.at8192 else 4096
         RUN_DIR = ROOT / ("outputs/runs/oracle8k" if args.at8192 else "outputs/runs/oracle4k")
-        TRAIN_ROUNDS = 2  # was 1; USER 2026-08-18: "see whether this
-                          # replicates across different context lengths" --
-                          # the peak-then-regress trajectory needs the
-                          # second trained round at every cap point.
+        TRAIN_ROUNDS = 3  # 1 -> 2 -> 3 (USER 2026-08-19 "do three rounds"):
+                          # the full peak / dip / recovery trajectory at
+                          # every cap point, matching the main run.
         ARMS = BUCKETS + ("random",)
         drive()
     elif args.build:
