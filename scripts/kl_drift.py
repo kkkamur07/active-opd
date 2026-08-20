@@ -92,6 +92,14 @@ def score_post(args) -> None:
 def analyze(args) -> None:
     rdir = round_dir(args)
     pre = read_rows(rdir / "oracle")
+    if not pre and args.round_index == 0:
+        # round 0 is the shared pool: scored once under the first arm, then
+        # copied per-arm without the oracle dir
+        for arm_dir in sorted((args.run_dir / "arms").iterdir()):
+            shared = arm_dir / "rounds" / "round_00" / "oracle"
+            if shared.exists():
+                pre = read_rows(shared)
+                break
     post = read_rows(rdir / "oracle_post")
     selected = {
         (r["example_index"], r["rollout_index"])
