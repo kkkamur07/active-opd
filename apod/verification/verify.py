@@ -12,12 +12,6 @@ PREDICTION_CONFIG = [LatexExtractionConfig(boxed_match_priority=0), ExprExtracti
 
 
 def parse_prediction(text: str | None) -> list[Any]:
-    """Everything math-verify can pull out of a generation, best candidate first.
-
-    An empty list means math-verify found nothing to compare, which is a
-    different failure from finding the wrong thing. Parse errors are folded into
-    "found nothing" because that is what they mean downstream: no candidate.
-    """
 
     if not text:
         return []
@@ -39,18 +33,10 @@ def parse_reference(reference: str | None) -> list[Any]:
 
 
 def grade(text: str | None, reference: str | None) -> dict[str, bool]:
-    """Correctness plus the two signals needed to classify a failure.
-
-    ``has_answer`` is loose on purpose: ``ExprExtractionConfig`` will happily
-    return the last number in a truncated mid-computation trace, so it says
-    "math-verify had something to compare", not "the model committed to an
-    answer". ``has_boxed`` is the strict version -- the model actually wrote
-    ``\\boxed{...}`` as the prompt asked. Reporting both keeps "no parseable
-    answer" from being confused with "wrong answer".
-    """
 
     prediction = parse_prediction(text)
     gold = parse_reference(reference)
+
     result = {
         "correct": False,
         "has_answer": bool(prediction),
@@ -60,6 +46,7 @@ def grade(text: str | None, reference: str | None) -> dict[str, bool]:
         # a dataset defect, not silently indistinguishable from wrong answers.
         "gold_parsed": bool(gold),
     }
+    
     if not prediction or not gold:
         return result
     try:

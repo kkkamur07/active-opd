@@ -21,9 +21,11 @@ def read_jsonl(path: str | Path, *, drop_torn_tail: bool = False) -> list[dict[s
     path = Path(path)
     if not path.exists():
         return []
+
     rows: list[dict[str, Any]] = []
     lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()]
     lines = [ln for ln in lines if ln]
+
     for i, line in enumerate(lines):
         try:
             rows.append(json.loads(line))
@@ -44,17 +46,20 @@ def write_jsonl(path: str | Path, rows: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+
     with tmp.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+
     os.replace(tmp, path)
 
 
 def append_jsonl(path: str | Path, row: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -71,10 +76,13 @@ def save_npz(path: str | Path, batch: dict[str, Any]) -> Path:
         "prompt_length": np.asarray(batch["prompt_length"], dtype=np.int32),
         "responses": np.asarray(batch["responses"], dtype=object),
     }
+
     if "finish_reasons" in batch:
         arrays["finish_reasons"] = np.asarray(batch["finish_reasons"], dtype=object)
+
     if "logits" in batch:
         arrays["logits"] = np.asarray(batch["logits"], dtype=np.float16)
+        
     np.savez_compressed(path, **arrays)
     return path
 

@@ -6,12 +6,7 @@ import torch
 
 
 def _require_cuda(device_map: str) -> None:
-    """Fail loudly when an accelerator was asked for but torch cannot see one.
-
-    ``device_map="auto"`` silently places the model on CPU when CUDA is
-    unavailable, which turns a broken install into a run that merely looks slow.
-    Pass ``device_map="cpu"`` to opt into CPU on purpose.
-    """
+    """Only supporting training on CUDA only"""
 
     if device_map == "cpu" or torch.cuda.is_available():
         return
