@@ -128,6 +128,19 @@ Not being built yet.
             teacher; pick the band where the teacher is strong and the student is
             weak — that is where distillation has headroom.
 
+## Next training run: decisions (USER 2026-08-31)
+
+- [ ] **No `all` control arm next run** (USER 2026-08-31: "this time we are not
+      going to do the comparison with all"). The all-12-rollouts arm was the
+      no-selection baseline in oracle16k (1536 rows, 48 steps/round, 3x the
+      bucket arms' training compute); the next run trains selection arms only.
+      Remove `all` from the run's ARMS tuple when building the driver.
+- **Effective batch: stays 32, no change needed.** USER asked for 32 believing
+  the current value was 16; verified 2026-08-31 that conf/train/gkd.yaml is
+  already 2 per-device x 8 accum x 2 ranks = 32 (raised from 16 on
+  2026-08-15, asserted via train.effective_batch). The "16" is the bucket
+  arms' optimizer steps per round (512 trajectories / 32), not the batch.
+
 ## Infrastructure notes (2026-08-14)
 
 - Boot disk resized 74 GB -> 246 GB online (growpart + resize2fs, mid-run, no
