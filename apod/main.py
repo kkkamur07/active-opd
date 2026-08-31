@@ -44,6 +44,7 @@ import hydra
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
+from apod import paths
 from apod.datasets.io import append_jsonl, read_jsonl, read_shards, write_jsonl
 from apod.datasets.load import load_examples
 
@@ -169,7 +170,7 @@ def _reuse_round0_eval(
     for other in cfg.arms:
         if str(other) == arm:
             continue
-        src = run_dir / "arms" / str(other) / "rounds" / "round_00" / "eval"
+        src = paths.round_dir(run_dir, str(other), 0) / "eval"
         if not _markers_present(src, num_shards):
             continue
         shard_files = sorted(src.glob("eval.shard*.jsonl"))
@@ -442,7 +443,7 @@ def _model_path(run_dir: Path, arm: str, rnd: int, cfg: DictConfig) -> str:
     loads) nor misrecord the base model as its start.
     """
     if rnd > 0:
-        return str(run_dir / "arms" / arm / "rounds" / f"round_{rnd - 1:02d}" / "checkpoint")
+        return str(paths.checkpoint_dir(run_dir, arm, rnd - 1))
     return str(cfg.model.student_id)
 
 
@@ -457,7 +458,7 @@ def _run_round(
     eval_only: bool,
 ) -> int:
     """Run (or resume) one (arm, round); returns the new cumulative count."""
-    round_dir = run_dir / "arms" / arm / "rounds" / f"round_{rnd:02d}"
+    round_dir = paths.round_dir(run_dir, arm, rnd)
     num_shards = int(cfg.num_gpus)
     resume = bool(cfg.resume)
     wall_clock: dict[str, float | None] = {k: None for k in WALL_CLOCK_KEYS}
@@ -645,7 +646,7 @@ def _run_round(
     # weights, and resolve_model_path names this setting when a re-run
     # reaches past the prune horizon.
     for old in range(rnd - int(cfg.keep_checkpoints) + 1):
-        old_ckpt = run_dir / "arms" / arm / "rounds" / f"round_{old:02d}" / "checkpoint"
+        old_ckpt = paths.checkpoint_dir(run_dir, arm, old)
         for weights in old_ckpt.glob("*.safetensors"):
             weights.unlink()
             logger.info("pruned superseded weights: {}", weights)

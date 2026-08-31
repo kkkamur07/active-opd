@@ -7,7 +7,12 @@ still works on a box without vLLM (or without a GPU at all).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import importlib.metadata as metadata
+import os
+import sysconfig
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -46,9 +51,6 @@ def _ensure_cuda_home() -> str | None:
     than making the caller export a variable, and leave an existing CUDA_HOME
     alone so a real toolkit still wins.
     """
-
-    import os
-    import sysconfig
 
     for name in ("CUDA_HOME", "CUDA_PATH"):
         existing = os.environ.get(name)
@@ -92,9 +94,6 @@ def _disable_flashinfer_sampler_if_toolkit_mismatched() -> str | None:
     Respects an explicit VLLM_USE_FLASHINFER_SAMPLER from the caller.
     """
 
-    import importlib.metadata as metadata
-    import os
-
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ:
         return None
 
@@ -113,6 +112,24 @@ def _disable_flashinfer_sampler_if_toolkit_mismatched() -> str | None:
     return reason
 
 
+def _config_cache_key(model_id: str) -> tuple[str, Path] | None:
+    """(config-content hash, vLLM cache root) for a local checkpoint, else None.
+
+    Both the served-model alias and the compile cache below are keyed by
+    config.json content rather than checkpoint path; hub model ids already
+    have a stable path and return None.
+    """
+
+    config_path = Path(model_id) / "config.json"
+    if not config_path.is_file():
+        return None
+    key = hashlib.sha256(config_path.read_bytes()).hexdigest()[:10]
+    cache_root = Path(
+        os.environ.get("VLLM_CACHE_ROOT", str(Path.home() / ".cache" / "vllm"))
+    )
+    return key, cache_root
+
+
 def _stable_model_alias(model_id: str) -> str:
     """Serve local checkpoints through a config-keyed symlink.
 
@@ -126,16 +143,10 @@ def _stable_model_alias(model_id: str) -> str:
     checkpoint. Hub model ids pass through untouched.
     """
 
-    import hashlib
-    import os
-
-    config_path = Path(model_id) / "config.json"
-    if not config_path.is_file():
+    keyed = _config_cache_key(model_id)
+    if keyed is None:
         return model_id
-    key = hashlib.sha256(config_path.read_bytes()).hexdigest()[:10]
-    cache_root = Path(
-        os.environ.get("VLLM_CACHE_ROOT", str(Path.home() / ".cache" / "vllm"))
-    )
+    key, cache_root = keyed
     alias = cache_root / "apod_model_alias" / key
     alias.parent.mkdir(parents=True, exist_ok=True)
     tmp = alias.parent / f"{key}.tmp.{os.getpid()}"
@@ -159,17 +170,11 @@ def _stable_compile_cache_dir(model_id: str) -> str | None:
     a fresh dir. Hub models keep vLLM's default (their path IS stable).
     """
 
-    import hashlib
-    import os
-
-    config_path = Path(model_id) / "config.json"
-    if not config_path.is_file():
+    keyed = _config_cache_key(model_id)
+    if keyed is None:
         return None
-    key = hashlib.sha256(config_path.read_bytes()).hexdigest()[:10]
-    cache_root = os.environ.get(
-        "VLLM_CACHE_ROOT", str(Path.home() / ".cache" / "vllm")
-    )
-    return str(Path(cache_root) / "apod_compile_cache" / key)
+    key, cache_root = keyed
+    return str(cache_root / "apod_compile_cache" / key)
 
 
 def build_llm(
@@ -325,7 +330,6 @@ def build_sampling_params(
     )
 
 
-# We also need to look at packing to improve the training computation as well. 
 def _pack(request_output, prompt: str, pad_id: int) -> dict[str, Any]:
     """One RequestOutput (n completions, shared prompt) -> the save_npz dict."""
 
@@ -334,11 +338,11 @@ def _pack(request_output, prompt: str, pad_id: int) -> dict[str, Any]:
     completions = list(request_output.outputs)
 
     lengths = np.asarray([len(c.token_ids) for c in completions], dtype=np.int32)
-    width = prompt_length + int(lengths.max()) if lengths.size else prompt_length
+    width = prompt_length + int(lengths.max(initial=0))
 
     input_ids = np.full((len(completions), width), pad_id, dtype=np.int32)
+    input_ids[:, :prompt_length] = prompt_ids
     for row, completion in enumerate(completions):
-        input_ids[row, :prompt_length] = prompt_ids
         input_ids[row, prompt_length : prompt_length + len(completion.token_ids)] = completion.token_ids
 
     return {
@@ -383,27 +387,18 @@ class _ThroughputMeter:
     chunks: int = 0
     prompts: int = 0
     seconds: float = 0.0
-    prompt_tokens: int = 0
-    cached_prompt_tokens: int = 0
-    generated_tokens: int = 0
-    sequences: int = 0
+    counts: Counter = dataclasses.field(default_factory=Counter)
 
     def add(self, *, prompts: int, seconds: float, counts: dict[str, int]) -> None:
         self.chunks += 1
         self.prompts += prompts
         self.seconds += seconds
-        self.prompt_tokens += counts["prompt_tokens"]
-        self.cached_prompt_tokens += counts["cached_prompt_tokens"]
-        self.generated_tokens += counts["generated_tokens"]
-        self.sequences += counts["sequences"]
+        self.counts.update(counts)
 
     def totals(self) -> dict[str, Any]:
         return _rates(
             seconds=self.seconds,
-            prompt_tokens=self.prompt_tokens,
-            cached_prompt_tokens=self.cached_prompt_tokens,
-            generated_tokens=self.generated_tokens,
-            sequences=self.sequences,
+            counts=self.counts,
             extra={"chunks": self.chunks, "prompts": self.prompts},
         )
 
@@ -411,10 +406,7 @@ class _ThroughputMeter:
 def _rates(
     *,
     seconds: float,
-    prompt_tokens: int,
-    cached_prompt_tokens: int,
-    generated_tokens: int,
-    sequences: int,
+    counts: dict[str, int],
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Counts plus the per-second rates they imply over ``seconds``.
@@ -430,11 +422,14 @@ def _rates(
     """
 
     span = max(float(seconds), 1e-9)
+    prompt_tokens = counts["prompt_tokens"]
+    generated_tokens = counts["generated_tokens"]
+    sequences = counts["sequences"]
     total_tokens = prompt_tokens + generated_tokens
     metrics: dict[str, Any] = {
         "seconds": float(seconds),
         "prompt_tokens": int(prompt_tokens),
-        "cached_prompt_tokens": int(cached_prompt_tokens),
+        "cached_prompt_tokens": int(counts["cached_prompt_tokens"]),
         "generated_tokens": int(generated_tokens),
         "total_tokens": int(total_tokens),
         "sequences": int(sequences),
@@ -488,6 +483,7 @@ def generate_trajectories_vllm(
     happen once up front and are outside it.
     """
 
+    # Not ``pad_token_id or eos_token_id``: token id 0 is falsy but a real id.
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
         pad_id = tokenizer.eos_token_id
@@ -516,10 +512,7 @@ def generate_trajectories_vllm(
         meter.add(prompts=stop - start, seconds=seconds, counts=counts)
         metrics = _rates(
             seconds=seconds,
-            prompt_tokens=counts["prompt_tokens"],
-            cached_prompt_tokens=counts["cached_prompt_tokens"],
-            generated_tokens=counts["generated_tokens"],
-            sequences=counts["sequences"],
+            counts=counts,
             extra={
                 "chunk_index": meter.chunks - 1,
                 "chunk_start": start,

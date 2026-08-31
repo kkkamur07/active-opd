@@ -35,6 +35,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from apod import paths
+
 ROOT = Path(__file__).resolve().parent.parent
 NUM_ROLLOUTS = 12
 
@@ -49,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def round_dir(args) -> Path:
-    return args.run_dir / "arms" / args.arm / "rounds" / f"round_{args.round_index:02d}"
+    return paths.round_dir(args.run_dir, args.arm, args.round_index)
 
 
 def read_rows(directory: Path) -> dict[tuple[int, int], dict]:
@@ -96,7 +98,7 @@ def analyze(args) -> None:
         # round 0 is the shared pool: scored once under the first arm, then
         # copied per-arm without the oracle dir
         for arm_dir in sorted((args.run_dir / "arms").iterdir()):
-            shared = arm_dir / "rounds" / "round_00" / "oracle"
+            shared = paths.round_dir(args.run_dir, arm_dir.name, 0) / "oracle"
             if shared.exists():
                 pre = read_rows(shared)
                 break

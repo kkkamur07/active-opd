@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import time
+from collections import defaultdict
 from pathlib import Path
 
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
@@ -34,18 +35,12 @@ from loguru import logger
 from omegaconf import OmegaConf
 
 from apod.datasets.io import read_jsonl, write_jsonl
+from apod.paths import round_dir
+from apod.stages.common import parse_stage_args, stage_parser
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--arm", required=True)
-    parser.add_argument("--round", type=int, required=True, dest="round_index")
-    return parser.parse_args()
-
-
-def round_dir(run_dir: Path, arm: str, round_index: int) -> Path:
-    return run_dir / "arms" / arm / "rounds" / f"round_{round_index:02d}"
+    return parse_stage_args(stage_parser(description=__doc__, needs_shards=False))
 
 
 def build_rows(
@@ -64,9 +59,9 @@ def build_rows(
     Returns (rows, completion_tokens, tail_truncated_rows).
     """
 
-    by_example: dict[int, list[dict]] = {}
+    by_example: dict[int, list[dict]] = defaultdict(list)
     for row in selected:
-        by_example.setdefault(row["example_index"], []).append(row)
+        by_example[row["example_index"]].append(row)
 
     rows: list[dict] = []
     completion_tokens = 0
@@ -268,8 +263,8 @@ def main() -> None:
         "trained {} trajectories ({} completion tokens) in {:.1f}s: "
         "loss mean {:.4f} -> final {:.4f}; checkpoint at {}",
         summary["num_trajectories"], summary["tokens_trained"], wall_clock,
-        summary["train_loss_mean"] or float("nan"),
-        summary["train_loss_final"] or float("nan"),
+        summary["train_loss_mean"] if summary["train_loss_mean"] is not None else float("nan"),
+        summary["train_loss_final"] if summary["train_loss_final"] is not None else float("nan"),
         checkpoint_dir,
     )
 

@@ -17,9 +17,7 @@ Writes <round>/entropy/entropy.shard{K}.jsonl  (+ done.shard{K} marker)
 
 from __future__ import annotations
 
-import argparse
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -30,8 +28,10 @@ from loguru import logger
 from omegaconf import OmegaConf
 from tqdm import tqdm
 
+from apod import paths
 from apod.datasets import append_jsonl, read_jsonl, write_jsonl
 from apod.models import load_lm
+from apod.stages.common import parse_stage_args, stage_parser
 
 
 def _decoder_and_head(model):
@@ -42,8 +42,10 @@ def _decoder_and_head(model):
     """
 
     body = getattr(model, "model", None)
+
     if body is None:
         body = getattr(model, "base_model", None)
+
     head = model.get_output_embeddings()
     # ``base_model`` returns the model itself when no inner body exists, which
     # would recurse straight back into the head.
@@ -66,6 +68,8 @@ def trace_scores(model, body, head, ids: np.ndarray, prompt_length: int, respons
 
     total = prompt_length + response_length
     device = next(model.parameters()).device
+
+    # Anything narrower than longTensor gets cast away. 
     tokens = torch.as_tensor(np.asarray(ids[:total], dtype=np.int64), device=device)[None]
 
     hidden = body(input_ids=tokens, use_cache=False)
@@ -75,6 +79,7 @@ def trace_scores(model, body, head, ids: np.ndarray, prompt_length: int, respons
     start, stop = prompt_length - 1, total - 1
     entropy_sum = 0.0
     logprob_sum = 0.0
+
     for a in range(start, stop, chunk):
         b = min(a + chunk, stop)
         log_probs = torch.log_softmax(head(hidden[a:b]).float(), dim=-1)
@@ -90,31 +95,17 @@ def trace_scores(model, body, head, ids: np.ndarray, prompt_length: int, respons
     }
 
 
-
-
 def shard_examples(tokens_dir: Path, shard: int, num_shards: int) -> list[tuple[int, Path]]:
     examples: list[tuple[int, Path]] = []
     for path in sorted(tokens_dir.glob("example_*.npz")):
-        match = re.fullmatch(r"example_(\d+)\.npz", path.name)
-        if match is None:
-            continue
-        example_index = int(match.group(1))
+        example_index = int(path.stem.split("_")[1])
         if example_index % num_shards == shard:
             examples.append((example_index, path))
     return examples
 
 
 def parse_args(argv: list[str] | None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--arm", required=True)
-    parser.add_argument("--round", type=int, required=True)
-    parser.add_argument("--shard", type=int, required=True)
-    parser.add_argument("--num-shards", type=int, required=True)
-    args = parser.parse_args(argv)
-    if not 0 <= args.shard < args.num_shards:
-        parser.error(f"--shard must be in [0, {args.num_shards}); got {args.shard}")
-    return args
+    return parse_stage_args(stage_parser(description=__doc__), argv)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(args.run_dir)
     cfg = OmegaConf.load(run_dir / "resolved_config.yaml")
 
-    round_dir = run_dir / "arms" / args.arm / "rounds" / f"round_{args.round:02d}"
+    round_dir = paths.round_dir(run_dir, args.arm, args.round_index)
     tokens_dir = round_dir / "rollouts" / "tokens"
     entropy_dir = round_dir / "entropy"
     out_path = entropy_dir / f"entropy.shard{args.shard}.jsonl"
@@ -150,13 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     done = {(r["example_index"], r["rollout_index"]) for r in scored_rows}
     logger.info(
         "arm={} round={} shard={}/{}: {} examples, {} trajectories already scored",
-        args.arm, args.round, args.shard, args.num_shards, len(examples), len(done),
+        args.arm, args.round_index, args.shard, args.num_shards, len(examples), len(done),
     )
 
     # Same resolution (and weights-present check) as rollout_eval and train.
     from apod.stages.rollout_eval import resolve_model_path
 
-    model_path = resolve_model_path(run_dir, args.arm, args.round, cfg)
+    model_path = resolve_model_path(run_dir, args.arm, args.round_index, cfg)
     # Entropy must be the GENERATING policy's uncertainty: scoring under any
     # other weights silently corrupts the selection signal. Assert we resolve
     # to the exact model the rollout stage recorded, and leave our own record.
@@ -180,12 +171,16 @@ def main(argv: list[str] | None = None) -> int:
     scored_tokens = 0
     scored_trajectories = 0
     for example_index, npz_path in tqdm(examples, desc=f"shard{args.shard}"):
-        batch = dict(np.load(npz_path, allow_pickle=True))
-        prompt_length = int(batch["prompt_length"])
-        for rollout_index in range(batch["input_ids"].shape[0]):
+        # Only the arrays this stage scores: the object-dtype response text
+        # stays unread on disk.
+        with np.load(npz_path, allow_pickle=True) as batch:
+            input_ids = batch["input_ids"]
+            prompt_length = int(batch["prompt_length"])
+            response_lengths = batch["response_lengths"]
+        for rollout_index in range(input_ids.shape[0]):
             if (example_index, rollout_index) in done:
                 continue
-            response_length = int(batch["response_lengths"][rollout_index])
+            response_length = int(response_lengths[rollout_index])
             if response_length <= 0:
                 logger.warning(
                     "example {} rollout {} has empty response; skipping",
@@ -194,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             scores = trace_scores(
                 model, body, head,
-                batch["input_ids"][rollout_index],
+                input_ids[rollout_index],
                 prompt_length,
                 response_length,
                 chunk,
@@ -208,7 +203,6 @@ def main(argv: list[str] | None = None) -> int:
             scored_trajectories += 1
 
     elapsed = time.perf_counter() - started
-    entropy_dir.mkdir(parents=True, exist_ok=True)
     marker.touch()
     logger.info(
         "scored {} trajectories / {} tokens in {:.1f}s ({:.0f} tok/s) -> {}",

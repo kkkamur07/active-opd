@@ -30,7 +30,6 @@ terminations, which match on text and carry no EOS id, or on a regression.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -42,9 +41,11 @@ from typing import Any
 import numpy as np
 from omegaconf import OmegaConf
 
+from apod import paths
 from apod.datasets import append_jsonl, read_jsonl, save_npz, write_jsonl
 from apod.models import build_llm, generate_trajectories_vllm, render_prompt
 from apod.models.generate_vllm import build_sampling_params
+from apod.stages.common import parse_stage_args, stage_parser
 from apod.verification import grade
 
 
@@ -105,12 +106,7 @@ def format_duration(seconds: float) -> str:
 
 
 def parse_args(argv: list[str] | None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--arm", required=True)
-    parser.add_argument("--round", type=int, required=True, dest="round_index")
-    parser.add_argument("--shard", type=int, required=True)
-    parser.add_argument("--num-shards", type=int, required=True)
+    parser = stage_parser(description=__doc__)
     parser.add_argument(
         "--eval-only", action="store_true", help="run only the eval (the final measurement round)"
     )
@@ -121,14 +117,7 @@ def parse_args(argv: list[str] | None):
         help="evaluate only the first N problems of the materialized set "
         "(driver sends the intermediate-round subset; default: all)",
     )
-    args = parser.parse_args(argv)
-    if args.round_index < 0:
-        parser.error(f"--round must be >= 0; got {args.round_index}")
-    if args.num_shards < 1:
-        parser.error(f"--num-shards must be >= 1; got {args.num_shards}")
-    if not 0 <= args.shard < args.num_shards:
-        parser.error(f"--shard must be in [0, {args.num_shards}); got {args.shard}")
-    return args
+    return parse_stage_args(parser, argv)
 
 
 def resolve_model_path(run_dir: Path, arm: str, round_index: int, cfg) -> str:
@@ -141,7 +130,7 @@ def resolve_model_path(run_dir: Path, arm: str, round_index: int, cfg) -> str:
 
     if round_index == 0:
         return str(cfg.model.student_id)
-    checkpoint = run_dir / "arms" / arm / "rounds" / f"round_{round_index - 1:02d}" / "checkpoint"
+    checkpoint = paths.checkpoint_dir(run_dir, arm, round_index - 1)
     if not any(checkpoint.glob("*.safetensors")):
         raise FileNotFoundError(
             f"round {round_index} expects weights in {checkpoint}; either the "
@@ -217,34 +206,46 @@ def collect_eos_ids(tokenizer, model_path: str) -> set[int]:
     # declares a DIFFERENT eos (<|endoftext|>) than the tokenizer
     # (<|im_end|>); trainer-saved checkpoints declare both. Union all three
     # sources so the terminator set is identical at round 0 and later rounds.
+    # Best effort per source, as before: a missing or broken config leaves
+    # the other sources' ids in place.
     try:
-        from transformers import GenerationConfig
-
-        declared = GenerationConfig.from_pretrained(model_path).eos_token_id
+        from transformers import AutoConfig, GenerationConfig
+    except Exception:
+        return ids
+    for load in (GenerationConfig.from_pretrained, AutoConfig.from_pretrained):
+        try:
+            declared = load(model_path).eos_token_id
+        except Exception:
+            continue
         if isinstance(declared, int):
             ids.add(declared)
         elif declared is not None:
             ids.update(int(token) for token in declared)
-    except Exception:
-        pass
-    try:
-        from transformers import AutoConfig
-
-        declared = AutoConfig.from_pretrained(model_path).eos_token_id
-        if isinstance(declared, int):
-            ids.add(declared)
-        elif declared is not None:
-            ids.update(int(token) for token in declared)
-    except Exception:
-        pass
     return ids
+
+
+def _sampling_kwargs(cfg) -> dict[str, Any]:
+    """The distribution settings shared by eval and rollouts.
+
+    One source, so the two stages provably sample from the same distribution
+    (per-call knobs like n and seed stay with the callers).
+    """
+
+    return {
+        "max_tokens": int(cfg.sampling.max_new_tokens),
+        "temperature": float(cfg.sampling.temperature),
+        "top_p": float(cfg.sampling.top_p),
+        "top_k": int(cfg.sampling.top_k),
+        "presence_penalty": float(cfg.sampling.presence_penalty),
+    }
 
 
 def run_eval(llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemoryProbe) -> None:
     eval_path = eval_dir / f"eval.shard{args.shard}.jsonl"
-    chunk_size = max(1, int(cfg.engine.target_concurrent_sequences) // int(cfg.eval.num_samples))
     num_samples = int(cfg.eval.num_samples)
+    chunk_size = max(1, int(cfg.engine.target_concurrent_sequences) // num_samples)
     seed_base = int(cfg.seed) + int(cfg.eval.eval_seed_offset) + args.round_index * int(cfg.eval.num_problems)
+    sampling = _sampling_kwargs(cfg)
 
     started = time.monotonic()
     generate_seconds = 0.0
@@ -263,14 +264,10 @@ def run_eval(llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemo
         params = [
             build_sampling_params(
                 n=num_samples,
-                max_tokens=int(cfg.sampling.max_new_tokens),
-                temperature=float(cfg.sampling.temperature),
-                top_p=float(cfg.sampling.top_p),
-                top_k=int(cfg.sampling.top_k),
-                presence_penalty=float(cfg.sampling.presence_penalty),
                 # Per (round, problem), independent of sharding and resume.
                 seed=seed_base + problem_index,
                 fast_presence_penalty=bool(cfg.sampling.fast_presence_penalty),
+                **sampling,
             )
             for problem_index, _ in chunk
         ]
@@ -381,15 +378,11 @@ def run_rollouts(
         tokenizer,
         [row["prompt"] for row in pending],
         n=num_rollouts,
-        max_tokens=int(cfg.sampling.max_new_tokens),
-        temperature=float(cfg.sampling.temperature),
-        top_p=float(cfg.sampling.top_p),
-        top_k=int(cfg.sampling.top_k),
-        presence_penalty=float(cfg.sampling.presence_penalty),
         chunk_size=chunk_size,
         seed=base_seed,
         enable_thinking=bool(cfg.model.enable_thinking),
         on_chunk=on_chunk,
+        **_sampling_kwargs(cfg),
     )
 
     for position, batch in batches:
@@ -449,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = OmegaConf.load(run_dir / "resolved_config.yaml")
     resume = bool(cfg.resume)
 
-    round_dir = run_dir / "arms" / args.arm / "rounds" / f"round_{args.round_index:02d}"
+    round_dir = paths.round_dir(run_dir, args.arm, args.round_index)
     eval_dir = round_dir / "eval"
     rollouts_dir = round_dir / "rollouts"
     eval_dir.mkdir(parents=True, exist_ok=True)

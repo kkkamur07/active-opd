@@ -58,6 +58,8 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
+from apod import paths
+
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_RUN = ROOT / "outputs/runs/apod"
 RUN_DIR = ROOT / "outputs/runs/oracle16k"
@@ -89,14 +91,14 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def arm_round(run_dir: Path, arm: str, rnd: int) -> Path:
-    return run_dir / "arms" / arm / "rounds" / f"round_{rnd:02d}"
+    return paths.round_dir(run_dir, arm, rnd)
 
 
 def checkpoint_path(arm: str, rnd: int) -> str:
     """Model that PRODUCES round rnd artifacts (mirrors resolve_model_path)."""
     if rnd == 0:
         return "Qwen/Qwen3.5-2B"
-    return str(arm_round(RUN_DIR, arm, rnd - 1) / "checkpoint")
+    return str(paths.checkpoint_dir(RUN_DIR, arm, rnd - 1))
 
 
 # --- build ------------------------------------------------------------------
