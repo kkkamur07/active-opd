@@ -11,6 +11,13 @@ that we can genuinely understand if there is a selection effect"):
     positions where the teacher has mass the student lacks (coverage gaps).
 Both come from the same two forward passes, so forward KL is free.
 
+Also per trajectory, from the same fp32 log-softmaxes at negligible extra
+cost: top-16 head agreement (Rethinking OPD, arXiv 2604.13016, Eq. 6-7) --
+the overlap ratio of the two models' top-16 id sets, and the overlap-token
+advantage with both distributions renormalized over the intersection.
+Analysis-only, never a loss term; k is fixed at 16, the paper's trained k
+(USER 2026-08-31: no k sweep).
+
 The attribution question for the entropy-vs-random null: if entropy-top4 and
 KL-top4 pick nearly the same trajectories, the selection PREMISE is weak; if
 they pick differently, mean entropy is the wrong proxy and a better statistic
@@ -41,9 +48,12 @@ from pathlib import Path
 
 import numpy as np
 
+from apod import paths
+
 STUDENT_ID = "Qwen/Qwen3.5-2B"
 TEACHER_ID = "Qwen/Qwen3.5-9B"
 POSITION_CHUNK = 1024  # fp32 log-softmax over 248k vocab, 1024 positions ~ 1 GiB
+K_OVERLAP = 16  # Rethinking-OPD's trained k for Eq. 6-7; fixed, no sweep (USER 2026-08-31)
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,7 +74,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def round_dir(args) -> Path:
-    return args.run_dir / "arms" / args.arm / "rounds" / f"round_{args.round_index:02d}"
+    return paths.round_dir(args.run_dir, args.arm, args.round_index)
 
 
 def out_path(args, shard: int) -> Path:
@@ -86,7 +96,11 @@ def compute(args) -> None:
     done = set()
     if out.exists():
         with out.open() as f:
-            done = {(r["example_index"], r["rollout_index"]) for r in map(json.loads, f)}
+            done = {
+                (r["example_index"], r["rollout_index"])
+                for r in map(json.loads, f)
+                if "overlap_ratio_top16" in r  # pre-Eq.6-7 rows get re-scored
+            }
 
     teacher = AutoModelForCausalLM.from_pretrained(
         TEACHER_ID, dtype=torch.bfloat16, device_map=device
@@ -114,6 +128,7 @@ def compute(args) -> None:
                 # Reverse KL at response positions: prediction at position t-1
                 # scores the token emitted at t, so slice [plen-1, plen+rlen-1).
                 rkl_sum, fkl_sum, sent_sum, tent_sum, n = 0.0, 0.0, 0.0, 0.0, 0
+                isz_sum, adv_sum, adv_n = 0.0, 0.0, 0
                 for lo in range(plen - 1, plen + rlen - 1, POSITION_CHUNK):
                     hi = min(lo + POSITION_CHUNK, plen + rlen - 1)
                     lp_s = torch.log_softmax(s_logits[lo:hi].float(), dim=-1)
@@ -129,7 +144,26 @@ def compute(args) -> None:
                     sent_sum += float(-(lp_s.exp() * lp_s).sum(-1).sum())
                     tent_sum += float(-(lp_t.exp() * lp_t).sum(-1).sum())
                     n += rkl.shape[0]
+                    # Top-16 head agreement (Eq. 6-7): |A cap B| where A/B are
+                    # the student's/teacher's top-16 ids, and the teacher's
+                    # advantage on the intersection with BOTH distributions
+                    # renormalized over it. A position with an empty
+                    # intersection contributes to the ratio but not the mean
+                    # advantage.
+                    sv, si = lp_s.topk(K_OVERLAP, dim=-1)
+                    ti = lp_t.topk(K_OVERLAP, dim=-1).indices
+                    in_both = (si.unsqueeze(-1) == ti.unsqueeze(1)).any(-1)
+                    isz = in_both.sum(-1)
+                    t_at_s = lp_t.gather(-1, si)
+                    lp_bar = sv - sv.masked_fill(~in_both, float("-inf")).logsumexp(-1, keepdim=True)
+                    lq_bar = t_at_s - t_at_s.masked_fill(~in_both, float("-inf")).logsumexp(-1, keepdim=True)
+                    term = (lp_bar.exp() * (lq_bar - lp_bar)).masked_fill(~in_both, 0.0)
+                    valid = isz > 0
+                    isz_sum += float(isz.sum())
+                    adv_sum += float((term.sum(-1) / isz.clamp(min=1))[valid].sum())
+                    adv_n += int(valid.sum())
                     del lp_s, lp_t, diff, rkl, fkl
+                    del sv, si, ti, in_both, isz, t_at_s, lp_bar, lq_bar, term, valid
                 del t_logits, s_logits
                 torch.cuda.empty_cache()
                 f.write(
@@ -141,6 +175,8 @@ def compute(args) -> None:
                             "mean_forward_kl": fkl_sum / max(n, 1),
                             "student_entropy": sent_sum / max(n, 1),
                             "teacher_entropy": tent_sum / max(n, 1),
+                            "overlap_ratio_top16": isz_sum / max(n * K_OVERLAP, 1),
+                            "overlap_adv_top16": adv_sum / max(adv_n, 1),
                             "response_length": rlen,
                             "truncated": bool(truncated[k]),
                         }
@@ -157,6 +193,9 @@ def analyze(args) -> None:
     for shard_file in sorted((rdir / "oracle").glob("oracle_kl.shard*.jsonl")):
         with shard_file.open() as f:
             oracle.extend(map(json.loads, f))
+    # Keep the LAST row per trajectory: a resume after the Eq. 6-7 fields
+    # were added re-scores old rows, leaving both versions in the shard file.
+    oracle = list({(r["example_index"], r["rollout_index"]): r for r in oracle}.values())
     entropy = []
     for shard_file in sorted((rdir / "entropy").glob("entropy.shard*.jsonl")):
         with shard_file.open() as f:
@@ -169,7 +208,11 @@ def analyze(args) -> None:
         by_example[r["example_index"]].append(r)
 
     print(f"n trajectories: {len(oracle)}  (examples: {len(by_example)})")
-    for key in ("mean_reverse_kl", "mean_forward_kl"):
+    extra_keys = [
+        k for k in ("overlap_ratio_top16", "overlap_adv_top16")
+        if oracle and all(k in r for r in oracle)
+    ]
+    for key in ("mean_reverse_kl", "mean_forward_kl", *extra_keys):
         kls = np.array([r[key] for r in oracle])
         print(
             f"{key} distribution: "
@@ -192,15 +235,15 @@ def analyze(args) -> None:
         ("entropy", "mean_forward_kl"),
         ("mean_reverse_kl", "mean_forward_kl"),
     ]
+    pairs += [(k, "mean_reverse_kl") for k in extra_keys]
     rhos = {p: [] for p in pairs}
     overlaps = {p: [] for p in pairs}
     for rows in by_example.values():
         if len(rows) < 2 or any(r["entropy"] is None for r in rows):
             continue
         vals = {
-            "entropy": [r["entropy"] for r in rows],
-            "mean_reverse_kl": [r["mean_reverse_kl"] for r in rows],
-            "mean_forward_kl": [r["mean_forward_kl"] for r in rows],
+            key: [r[key] for r in rows]
+            for key in ("entropy", "mean_reverse_kl", "mean_forward_kl", *extra_keys)
         }
         for a, b in pairs:
             rho = spearman(vals[a], vals[b])
@@ -217,7 +260,7 @@ def analyze(args) -> None:
         )
     # Termination link (hypothesis #1): do the scores differ for cap-hit vs
     # finished trajectories?
-    for key in ("mean_reverse_kl", "mean_forward_kl", "entropy"):
+    for key in ("mean_reverse_kl", "mean_forward_kl", "entropy", *extra_keys):
         t = [r[key] for r in oracle if r["truncated"] and r.get(key) is not None]
         fin = [r[key] for r in oracle if not r["truncated"] and r.get(key) is not None]
         if t and fin:
