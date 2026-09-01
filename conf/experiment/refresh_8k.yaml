@@ -1,0 +1,40 @@
+# @package _global_
+# Shared regime of the step-based runs r1/r2/r3 (python -m apod.driver):
+# cap 8192 everywhere (labels, training, eval; ADR 0005), 100 training
+# steps per arm at effective batch 32, a refresh every 10 steps, all 500
+# MATH-500 questions + the AIME 2025+2026 monitor at every refresh
+# (ADR 0006). The experiment files inherit this and add their arms.
+# Not runnable on its own (no arms).
+keep_checkpoints: 2              # weights of the newest 2 refreshes per arm
+
+driver:
+  steps_total: 100
+  refresh_every: 10
+
+sampling:
+  max_new_tokens: 8192
+engine:
+  max_model_len: 16384
+eval:
+  intermediate_num_problems: 500  # every refresh evaluates all 500
+
+train:
+  max_length: 16384
+  per_device_train_batch_size: 8  # 2 ranks x 8 x 2 = effective batch 32
+  gradient_accumulation_steps: 2  # (kl50 micro probe at cap 8192: 71.5 GiB)
+  # Peak LR = the kl50w probe verdict (outputs/runs/kl50w/lr_probe.json
+  # "chosen_lr", refined by lr_refine.json; USER 2026-09-01). conf/train/
+  # gkd.yaml keeps 2e-5 for the live kl50w chain.
+  learning_rate: 3.1623e-06
+  # ONE LR schedule over the whole run (USER 2026-09-01): warmup 5 steps
+  # (5% of 100) at the very start, then cosine to 10% of peak over
+  # total_training_steps. The train stage builds that schedule and resumes
+  # it at the --global-step-offset the driver passes on every launch (0,
+  # 10, ..., 90: steps already trained for the arm); Adam moments carried
+  # across refreshes by train.persist_optimizer.
+  total_training_steps: ${driver.steps_total}
+  warmup_steps: 5
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.1
+  persist_optimizer: true

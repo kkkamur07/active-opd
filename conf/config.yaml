@@ -12,6 +12,7 @@ defaults:
   - selection: default
   - train: gkd
   - tracking            # conf/tracking.yaml -> cfg.tracking (W&B, apod/tracking.py)
+  - driver
   - bank
   - _self_
 

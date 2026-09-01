@@ -1,8 +1,11 @@
-"""Plot MATH-500 accuracy vs training step (contract: docs/pipeline.md).
+"""Plot accuracy vs training step (contract: docs/pipeline.md).
 
-Reads metrics.jsonl and renders plots/accuracy_vs_steps.png: one curve
-per arm, avg@n on top, pass@n below (dashed) as two stacked panels sharing the
-x-axis -- never a dual-axis chart.
+Reads metrics.jsonl and renders plots/accuracy_vs_steps.png. Two row
+schemas: ``plot_refresh_curves`` for apod.driver runs (one row per (arm,
+step), strict avg@n per eval set with a noise band, cap-hit panel) and
+``plot_results`` for apod.main runs (one row per (arm, round), avg@n on
+top, pass@n below). Stacked panels sharing the x-axis -- never a dual-axis
+chart. The rest of this docstring describes the apod.main schema.
 
 X-axis semantics: one training step = one optimizer step at the effective
 batch (cfg.train.effective_batch, asserted 32 by the train stage), so
@@ -161,11 +164,105 @@ def plot_results(run_dir: Path) -> Path:
     return out_path
 
 
+def plot_refresh_curves(run_dir: Path, *, band_points: float = 5.0) -> Path:
+    """Curves of a step-based run (apod.driver): strict accuracy vs training step.
+
+    metrics.jsonl rows are one per (arm, step) with ``eval[<set>]`` summaries.
+    Panels, sharing the step axis: strict avg@n on the primary set
+    (MATH-500), strict avg@n on each monitor set (AIME 2025+2026), and the
+    cap-hit rate of both. Every accuracy curve carries a shaded band of
+    ``band_points`` (full width, in accuracy points): the seed-replicate
+    noise floor (docs/eval_benchmarks.md section 6, 4-7 point gaps at a
+    fixed step), so two curves whose bands overlap are not distinguishable
+    on one seed.
+    """
+
+    rows = read_jsonl(run_dir / "metrics.jsonl")
+    if not rows:
+        raise FileNotFoundError(f"no metrics rows found at {run_dir / 'metrics.jsonl'}")
+    run_name = run_dir.name
+    eff_batch = 32
+    cfg_path = run_dir / "resolved_config.yaml"
+    if cfg_path.exists():
+        cfg = OmegaConf.load(cfg_path)
+        run_name = str(cfg.get("run_name", run_name))
+        eff_batch = int(cfg.train.get("effective_batch", eff_batch))
+
+    arms: list[str] = []
+    sets: list[str] = []
+    for row in rows:
+        if row["arm"] not in arms:
+            arms.append(row["arm"])
+        for name in row["eval"]:
+            if name not in sets:
+                sets.append(name)
+    half_band = band_points / 200.0  # points -> fraction, half width each side
+
+    fig, axes = plt.subplots(
+        len(sets) + 1, 1, sharex=True, figsize=(8.5, 3.2 * (len(sets) + 1)), facecolor=SURFACE
+    )
+    overflow: list[str] = []
+    for arm in arms:
+        arm_rows = sorted((r for r in rows if r["arm"] == arm), key=lambda r: r["step"])
+        xs = [r["step"] for r in arm_rows]
+        color = _arm_color(arm, overflow)
+        for ax, name in zip(axes, sets):
+            ys = [r["eval"][name]["strict_avg_at_n"] for r in arm_rows]
+            ax.fill_between(xs, [y - half_band for y in ys], [y + half_band for y in ys], color=color, alpha=0.10, linewidth=0)
+            ax.plot(xs, ys, color=color, linewidth=2, marker="o", markersize=5, label=arm)
+            ax.annotate(arm, (xs[-1], ys[-1]), xytext=(8, 0), textcoords="offset points",
+                        va="center", fontsize=9, color=INK_SECONDARY)
+        for name, style in zip(sets, ("-", "--", ":", "-.")):
+            axes[-1].plot(
+                xs, [r["eval"][name]["cap_hit_rate"] for r in arm_rows],
+                color=color, linewidth=1.5, linestyle=style, marker="o", markersize=4,
+                label=f"{arm} ({name})",
+            )
+
+    for ax, name in zip(axes, sets):
+        _style_axis(ax)
+        n = next(r["eval"][name]["num_samples"] for r in rows if name in r["eval"])
+        ax.set_ylabel(f"{name} strict avg@{n}", color=INK_SECONDARY)
+        ax.set_title(
+            f"{name}: strict avg@{n} vs training step (band = {band_points:g}-point noise floor)",
+            color=INK_SECONDARY, fontsize=10, loc="left",
+        )
+        ax.legend(loc="best", frameon=False, fontsize=9, labelcolor=INK_SECONDARY)
+        ax.margins(x=0.12)
+    _style_axis(axes[-1])
+    axes[-1].set_ylabel("cap-hit rate", color=INK_SECONDARY)
+    axes[-1].set_title("cap-hit rate (solid: primary set; dashed: monitor sets)", color=INK_SECONDARY, fontsize=10, loc="left")
+    axes[-1].set_xlabel(f"training step (batch={eff_batch})", color=INK_SECONDARY)
+    axes[-1].legend(loc="best", frameon=False, fontsize=7, labelcolor=INK_SECONDARY, ncol=2)
+    fig.suptitle(f"{run_name}: accuracy vs training step", color=INK_PRIMARY, fontsize=12, x=0.02, ha="left")
+
+    out_path = run_dir / "plots" / "accuracy_vs_steps.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("wrote {}", out_path)
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--band-points", type=float, default=None,
+                        help="noise band width in accuracy points for step-based runs "
+                             "(default: driver.noise_band_points of the run, else 5)")
     args = parser.parse_args()
-    plot_results(args.run_dir.resolve())
+    run_dir = args.run_dir.resolve()
+    rows = read_jsonl(run_dir / "metrics.jsonl")
+    if rows and "step" in rows[0]:  # apod.driver run: one row per (arm, step)
+        band = args.band_points
+        if band is None:
+            cfg_path = run_dir / "resolved_config.yaml"
+            cfg = OmegaConf.load(cfg_path) if cfg_path.exists() else {}
+            band = float(cfg.get("driver", {}).get("noise_band_points", 5.0))
+        plot_refresh_curves(run_dir, band_points=band)
+    else:  # apod.main run: one row per (arm, round)
+        plot_results(run_dir)
 
 
 if __name__ == "__main__":

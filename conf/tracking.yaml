@@ -13,7 +13,11 @@ mode: online   # logged in 2026-09-01 (krrish-agar); offline + `wandb sync` is t
                      # (all offline-run dirs of an arm share its run id).
                      # disabled (or wandb not installed) -> every call is a no-op.
 project: apod
-entity: null         # W&B team/user; null -> the logged-in default
+entity: krrish-agar-ludwig-maximilianuniversity-of-munich
+                     # the key's DEFAULT entity is the team asthadu29-...-munich, where
+                     # wandb.init fails with "API key cannot access this resource"
+                     # (no project-create rights, checked 2026-09-01 20:56 UTC);
+                     # the personal entity creates runs fine.
 experiment: null     # second tag; null -> the run dir name
 dir: null            # wandb writes <dir>/wandb/; null -> <run_dir> (so runs
                      # sit in <run_dir>/wandb/offline-run-*-<id>)

@@ -1,8 +1,9 @@
 # AIME 2025 + 2026 pooled monitor (ADR 0006). Runs alongside MATH-500 at
 # every refresh (eval + re-rollout every 10 training steps), at the RUN cap
-# (sampling.max_new_tokens, 8192): apod.stages.rollout_eval --eval-only
-# --eval-dataset aime2526 reads pool/eval_problems_aime2526.jsonl and writes
-# eval_aime2526/ next to the MATH-500 eval/, whose layout is untouched.
+# (sampling.max_new_tokens, 8192), in the same apod.stages.rollout_eval
+# engine session (--eval-dataset math500 aime2526): reads
+# pool/eval_problems_aime2526.jsonl and writes eval_aime2526/ next to the
+# MATH-500 eval/, whose layout is untouched.
 # 30 questions per year is too few to separate arms on its own (naive SE
 # ~2 pts at 60x16, between-question variance larger still): quote the
 # cluster-bootstrap interval and let MATH-500 carry arm-vs-arm claims.

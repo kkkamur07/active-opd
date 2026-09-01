@@ -9,9 +9,13 @@ land in their own files and their own done-markers (``run_session``). Written
 against ``docs/pipeline.md``; loads
 ``<run-dir>/resolved_config.yaml`` with ``OmegaConf.load`` (stages are plain
 scripts, not Hydra apps). The driver launches one process per shard with
-``CUDA_VISIBLE_DEVICES`` set to that shard's GPU. ``--eval-dataset <name>``
-evaluates a named set (``conf/eval/<name>.yaml``, e.g. the AIME 2025+2026
-monitor) into ``eval_<name>/`` instead of the MATH-500 ``eval/``.
+``CUDA_VISIBLE_DEVICES`` set to that shard's GPU. ``--eval-dataset <name>...``
+names the eval set(s) of the session (``conf/eval/<name>.yaml``): one named
+set alone evaluates it into ``eval_<name>/`` instead of the MATH-500
+``eval/``; several (``--eval-dataset math500 aime2526``, the step-based
+driver's every refresh) share the one generate stream, each with its own
+files and markers, so the AIME 2025+2026 monitor costs no second engine
+session.
 
 Seeds:
   eval     -- deterministic per (round, problem):
@@ -127,38 +131,49 @@ def parse_args(argv: list[str] | None):
     )
     parser.add_argument(
         "--eval-dataset",
+        nargs="+",
         default=None,
-        help="named eval set (conf/eval/<name>.yaml); default cfg.eval.dataset "
-        "(MATH-500). A non-default set reads pool/eval_problems_<name>.jsonl "
-        "and writes eval_<name>/ (see select_eval_set)",
+        help="eval set(s) of this engine session (conf/eval/<name>.yaml keys); "
+        "default: cfg.eval.dataset (MATH-500) alone. A non-default set reads "
+        "pool/eval_problems_<name>.jsonl and writes eval_<name>/ (see "
+        "eval_protocol). Several names share one generate stream, each with "
+        "its own files and done-markers: the step-based driver passes the "
+        "MATH-500 set and the AIME 2025+2026 monitor together",
     )
     return parse_stage_args(parser, argv)
 
 
-def select_eval_set(cfg, name: str | None) -> tuple[str, str]:
-    """(eval subdir, pool file name) for the requested eval set.
+def eval_protocol(cfg, name: str | None) -> tuple[str, str, Any]:
+    """(eval subdir, pool file name, protocol) of one eval set; ``cfg`` untouched.
 
     The default (``cfg.eval.dataset``) keeps the ``eval/`` +
-    ``pool/eval_problems.jsonl`` layout byte-identical. A named set swaps
-    ``cfg.eval`` for that benchmark's protocol (num_problems, num_samples,
-    eval_seed_offset) -- ``cfg.eval_sets.<name>`` when the launcher stamped
-    one into resolved_config.yaml (scripts/terminal_eval.py --num-samples),
-    else ``conf/eval/<name>.yaml`` -- and goes to ``eval_<name>/`` +
-    ``pool/eval_problems_<name>.jsonl``, which the launcher materializes like
-    the driver does for the monitor set.
+    ``pool/eval_problems.jsonl`` layout byte-identical. A named set has its
+    own protocol (num_problems, num_samples, eval_seed_offset) --
+    ``cfg.eval_sets.<name>`` when the launcher stamped one into
+    resolved_config.yaml (apod.driver, scripts/terminal_eval.py
+    --num-samples), else ``conf/eval/<name>.yaml`` -- and goes to
+    ``eval_<name>/`` + ``pool/eval_problems_<name>.jsonl``, which the
+    launcher materializes like the driver does for the monitor set.
     """
 
     if name is None or name == str(cfg.eval.dataset):
-        return "eval", "eval_problems.jsonl"
+        return "eval", "eval_problems.jsonl", cfg.eval
     stamped = cfg.get("eval_sets", {}).get(name)
-    if stamped is not None:
-        cfg.eval = stamped
-    else:
+    if stamped is None:
         conf = Path(__file__).resolve().parents[2] / "conf" / "eval" / f"{name}.yaml"
         if not conf.exists():
             raise FileNotFoundError(f"no eval protocol for {name!r}: {conf}")
-        cfg.eval = OmegaConf.load(conf)
-    return f"eval_{name}", f"eval_problems_{name}.jsonl"
+        stamped = OmegaConf.load(conf)
+    return f"eval_{name}", f"eval_problems_{name}.jsonl", stamped
+
+
+def select_eval_set(cfg, name: str | None) -> tuple[str, str]:
+    """``eval_protocol`` that also swaps ``cfg.eval`` for the set's protocol
+    (single-set callers: scripts/terminal_eval.py)."""
+
+    subdir, pool_file, protocol = eval_protocol(cfg, name)
+    cfg.eval = protocol
+    return subdir, pool_file
 
 
 def resolve_model_path(run_dir: Path, arm: str, round_index: int, cfg) -> str:
@@ -290,14 +305,18 @@ class EvalWriter:
     rollout requests of the same session are still in flight.
     """
 
-    def __init__(self, cfg, args, eval_dir: Path, pending, marker: Path) -> None:
+    def __init__(self, cfg, args, eval_dir: Path, pending, marker: Path, protocol=None) -> None:
+        """``protocol``: the set's eval config (``eval_protocol``); default ``cfg.eval``."""
+
         self.cfg = cfg
         self.pending = pending
         self.path = eval_dir / f"eval.shard{args.shard}.jsonl"
         self.marker = marker
-        self.num_samples = int(cfg.eval.num_samples)
+        protocol = cfg.eval if protocol is None else protocol
+        self.name = str(protocol.dataset)
+        self.num_samples = int(protocol.num_samples)
         self.seed_base = (
-            int(cfg.seed) + int(cfg.eval.eval_seed_offset) + args.round_index * int(cfg.eval.num_problems)
+            int(cfg.seed) + int(protocol.eval_seed_offset) + args.round_index * int(protocol.num_problems)
         )
         # (flat completions, verdict futures) per taken problem; consumed by
         # drain() after the NEXT chunk's generate returns (see run_session).
@@ -368,7 +387,7 @@ class EvalWriter:
             accuracy = self.n_correct / self.n_total if self.n_total else 0.0
             mean_length = self.response_tokens / self.n_total if self.n_total else 0.0
             print(
-                f"eval done: {len(self.pending)} problems  correct {self.n_correct}/{self.n_total} "
+                f"eval {self.name} done: {len(self.pending)} problems  correct {self.n_correct}/{self.n_total} "
                 f"({accuracy:.3f})  truncated {self.n_truncated}  mean {mean_length:.0f} tok/sample",
                 flush=True,
             )
@@ -376,7 +395,7 @@ class EvalWriter:
 
     def progress(self) -> str:
         return (
-            f"eval {self.done}/{len(self.pending)}  correct {self.n_correct}/{self.n_total}  "
+            f"eval {self.name} {self.done}/{len(self.pending)}  correct {self.n_correct}/{self.n_total}  "
             f"truncated {self.n_truncated}"
         )
 
@@ -564,14 +583,15 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(args.run_dir)
     cfg = OmegaConf.load(run_dir / "resolved_config.yaml")
     resume = bool(cfg.resume)
-    eval_subdir, eval_pool_file = select_eval_set(cfg, args.eval_dataset)
+    # One (subdir, pool file, protocol) per eval set of this session; the
+    # default is cfg.eval alone.
+    eval_sets = [eval_protocol(cfg, name) for name in (args.eval_dataset or [None])]
 
     round_dir = paths.round_dir(run_dir, args.arm, args.round_index)
-    eval_dir = round_dir / eval_subdir
     rollouts_dir = round_dir / "rollouts"
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    eval_marker = eval_dir / f"done.shard{args.shard}"
-    eval_marker.unlink(missing_ok=True)
+    for eval_subdir, _, _ in eval_sets:
+        (round_dir / eval_subdir).mkdir(parents=True, exist_ok=True)
+        (round_dir / eval_subdir / f"done.shard{args.shard}").unlink(missing_ok=True)
     rollout_marker = rollouts_dir / f"done.shard{args.shard}"
     if not args.eval_only:
         rollouts_dir.mkdir(parents=True, exist_ok=True)
@@ -581,7 +601,9 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"{args.arm} round {args.round_index} shard {args.shard}/{args.num_shards}: "
         f"model {model_path}" + ("  (eval only)" if args.eval_only else "")
-        + (f"  eval set {cfg.eval.dataset} -> {eval_subdir}/" if eval_subdir != "eval" else ""),
+        + "".join(
+            f"  eval set {protocol.dataset} -> {subdir}/" for subdir, _, protocol in eval_sets if subdir != "eval"
+        ),
         flush=True,
     )
     if not args.eval_only:
@@ -595,26 +617,32 @@ def main(argv: list[str] | None = None) -> int:
     # so problem_index -> problem is immutable for the run's lifetime; loading
     # from the live Hub dataset here would let an upstream update silently
     # remap indices between rounds.
-    problems = read_jsonl(run_dir / "pool" / eval_pool_file)
-    if len(problems) != int(cfg.eval.num_problems):
-        raise RuntimeError(
-            f"pool/{eval_pool_file} has {len(problems)} problems, expected "
-            f"eval.num_problems={cfg.eval.num_problems}; run the driver "
-            "(apod.main) or scripts/terminal_eval.py to materialize the eval "
-            "set before invoking stages"
+    eval_work = []  # (subdir, protocol, done count, pending) per eval set
+    for eval_subdir, eval_pool_file, protocol in eval_sets:
+        problems = read_jsonl(run_dir / "pool" / eval_pool_file)
+        if len(problems) != int(protocol.num_problems):
+            raise RuntimeError(
+                f"pool/{eval_pool_file} has {len(problems)} problems, expected "
+                f"num_problems={protocol.num_problems} of eval set {protocol.dataset}; "
+                "run the driver (apod.driver / apod.main) or scripts/terminal_eval.py "
+                "to materialize the eval set before invoking stages"
+            )
+        # Intermediate rounds evaluate a PREFIX of the materialized set, so
+        # problem_index means the same problem at every round and eval size.
+        if args.eval_num_problems is not None:
+            problems = problems[: args.eval_num_problems]
+        eval_done = load_complete_rows(
+            round_dir / eval_subdir / f"eval.shard{args.shard}.jsonl",
+            "problem_index", int(protocol.num_samples), resume,
         )
-    # Intermediate rounds evaluate a PREFIX of the materialized set, so
-    # problem_index means the same problem at every round and eval size.
-    if args.eval_num_problems is not None:
-        problems = problems[: args.eval_num_problems]
-    eval_done = load_complete_rows(
-        eval_dir / f"eval.shard{args.shard}.jsonl", "problem_index", int(cfg.eval.num_samples), resume
-    )
-    eval_pending = [
-        (i, ex)
-        for i, ex in enumerate(problems)
-        if i % args.num_shards == args.shard and i not in eval_done
-    ]
+        eval_pending = [
+            (i, ex)
+            for i, ex in enumerate(problems)
+            if i % args.num_shards == args.shard and i not in eval_done
+        ]
+        eval_work.append((eval_subdir, protocol, len(eval_done), eval_pending))
+    eval_pending_total = sum(len(pending) for _, _, _, pending in eval_work)
+    eval_done_total = sum(done for _, _, done, _ in eval_work)
 
     rollout_pending: list[dict[str, Any]] = []
     if not args.eval_only:
@@ -652,41 +680,48 @@ def main(argv: list[str] | None = None) -> int:
                 "(build_sampling_params has no native-penalty path)"
             )
         print(
-            f"pending: {len(eval_pending)} eval problems ({len(eval_done)} done), "
+            f"pending: {eval_pending_total} eval problems ({eval_done_total} done), "
             f"{len(rollout_pending)} rollout prompts ({len(rollout_done)} done)",
             flush=True,
         )
     else:
-        print(f"pending: {len(eval_pending)} eval problems ({len(eval_done)} done)", flush=True)
+        print(f"pending: {eval_pending_total} eval problems ({eval_done_total} done)", flush=True)
 
     wall_started = time.monotonic()
-    if eval_pending or rollout_pending:
+    if eval_pending_total or rollout_pending:
         memory = GpuMemoryProbe()
         memory.sample()
         # Fork the grading workers BEFORE the engine exists so the children
         # never inherit a CUDA context; grade() is pure CPU (sympy).
         graders = ProcessPoolExecutor(max_workers=8)
         list(graders.map(grade, [""] * 8, ["0"] * 8))  # force all forks now
+        # vLLM admits max_num_seqs=256 by default; a larger concurrency
+        # target only fills the engine if that ceiling moves with it.
+        concurrency = int(cfg.engine.target_concurrent_sequences)
+        engine_extra = {"max_num_seqs": concurrency} if concurrency > 256 else {}
         llm = build_llm(
             model_path,
             max_model_len=int(cfg.engine.max_model_len),
             gpu_memory_utilization=float(cfg.engine.gpu_memory_utilization),
             seed=int(cfg.seed),
             fast_presence_penalty=bool(cfg.sampling.fast_presence_penalty),
-            # vLLM's A100 default is 256; the scheduler must admit as many
-            # sequences as the chunking targets or a larger target is a no-op.
-            max_num_seqs=int(cfg.engine.target_concurrent_sequences),
+            **engine_extra,
         )
         tokenizer = llm.get_tokenizer()
 
-        # Eval requests go first in the stream; a resumed round whose eval is
-        # complete submits rollouts only and never regenerates eval rows.
+        # Eval requests go first in the stream (sets in the order given); a
+        # resumed round whose eval is complete submits rollouts only and
+        # never regenerates eval rows.
         writers: list[Any] = []
-        if eval_pending:
-            writers.append(EvalWriter(cfg, args, eval_dir, eval_pending, eval_marker))
-        else:
-            print("eval: nothing pending", flush=True)
-            eval_marker.touch()
+        for eval_subdir, protocol, _, eval_pending in eval_work:
+            eval_marker = round_dir / eval_subdir / f"done.shard{args.shard}"
+            if eval_pending:
+                writers.append(
+                    EvalWriter(cfg, args, round_dir / eval_subdir, eval_pending, eval_marker, protocol=protocol)
+                )
+            else:
+                print(f"eval {protocol.dataset}: nothing pending", flush=True)
+                eval_marker.touch()
         if rollout_pending:
             writers.append(
                 RolloutWriter(cfg, args, rollouts_dir, rollout_pending, rollout_marker, model_path, tokenizer)
@@ -702,7 +737,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"peak GPU memory: {memory.gib():.2f} GiB", flush=True)
     else:
         print("nothing pending; touching markers", flush=True)
-        eval_marker.touch()
+        for eval_subdir, _, _ in eval_sets:
+            (round_dir / eval_subdir / f"done.shard{args.shard}").touch()
         if not args.eval_only:
             rollout_marker.touch()
 
