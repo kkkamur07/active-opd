@@ -1,34 +1,40 @@
-"""Terminal eval of one checkpoint: MATH-500 avg@4 + AIME 2025/2026 avg@16 at a
-long cap, strict scored, with honest error bars (ADR 0005).
+"""Evaluate one checkpoint on MATH-500 + AIME 2025/2026, strict scored, with
+honest error bars (ADR 0006).
 
-Reuses ``apod.stages.rollout_eval`` (one vLLM engine session per shard and
-dataset) through a derived run dir, ``<run>/terminal_eval/cap<cap>/``:
+Defaults reproduce the refresh monitor protocol (MATH-500 avg@4, pooled AIME
+avg@16, the run's own cap) on a chosen checkpoint; ``--max-new-tokens 16384``
+and/or ``--num-samples`` give a headline table at a longer cap or a
+different k. Reuses ``apod.stages.rollout_eval`` (one vLLM engine session
+per shard and dataset) through a derived run dir,
+``<run>/terminal_eval/cap<cap>[_k<K>]/``:
 
-  resolved_config.yaml                     source config, cap + max_model_len swapped
+  resolved_config.yaml                     source config; cap, max_model_len and
+                                              any --num-samples override stamped in
   pool/eval_problems.jsonl                 -> source pool (same MATH-500 index map
-                                              as every round's monitor eval)
+                                              as every refresh's monitor eval)
   pool/eval_problems_aime2526.jsonl        materialized once, like the driver does
   arms/<arm>/rounds/round_{R}/checkpoint   -> source checkpoint (symlink)
   arms/<arm>/rounds/round_{R+1}/eval/               MATH-500 shards (stage layout)
   arms/<arm>/rounds/round_{R+1}/eval_aime2526/      AIME shards
   arms/<arm>/rounds/round_{R+1}/terminal_summary.json   the table below
 
-The stage's own "round R+1 evaluates round_R/checkpoint" resolution measures
-the chosen checkpoint, exactly as the driver's terminal eval-only round does,
-and its row-level resume makes a killed run pick up where it stopped.
+The stage's own "round_{R+1} evaluates round_R/checkpoint" resolution
+measures the chosen checkpoint, exactly as the driver's final eval-only
+refresh does, and its row-level resume makes a killed run pick up where it
+stopped.
 
 Scoring is STRICT: no \\boxed answer = incorrect, cap-hit traces included.
 Error bars per dataset: the naive Bernoulli SE sqrt(p(1-p)/(n k)) and a
-problem-level cluster bootstrap 95% interval (resample problems with
-replacement, keeping all k samples of a problem together), the one that
-respects the between-problem variance a 30-problem set is dominated by.
+question-level cluster bootstrap 95% interval (resample questions with
+replacement, keeping all k samples of a question together), the one that
+respects the between-question variance a 30-question set is dominated by.
 Pooled sets are also split per source (aime2025 / aime2026) from the id
 prefix.
 
 Usage:
   uv run python scripts/terminal_eval.py --run-dir outputs/runs/kl50w --arm kl_mid
   uv run python scripts/terminal_eval.py --run-dir outputs/runs/kl50w --arm kl_mid \\
-      --round 1 --max-new-tokens 32768 --gpus 1
+      --round 1 --max-new-tokens 16384 --gpus 1
 """
 
 from __future__ import annotations
@@ -60,7 +66,7 @@ def log(msg: str) -> None:
 
 
 def latest_checkpoint_round(run_dir: Path, arm: str) -> int:
-    """Newest round whose checkpoint still has weights (retention prunes old ones)."""
+    """Newest round_XX whose checkpoint still has weights (retention prunes old ones)."""
 
     with_weights = [
         int(d.name.split("_")[1])
@@ -80,8 +86,10 @@ def eval_protocol(cfg, dataset: str):
     return subdir, pool_file, scratch.eval
 
 
-def prepare_run_dir(source: Path, arm: str, rnd: int, cap: int, datasets: list[str]) -> Path:
-    derived = source / "terminal_eval" / f"cap{cap}"
+def prepare_run_dir(
+    source: Path, arm: str, rnd: int, cap: int, datasets: list[str], num_samples: int | None
+) -> Path:
+    derived = source / "terminal_eval" / (f"cap{cap}" + (f"_k{num_samples}" if num_samples else ""))
     derived.mkdir(parents=True, exist_ok=True)
 
     cfg = OmegaConf.load(source / "resolved_config.yaml")
@@ -90,6 +98,16 @@ def prepare_run_dir(source: Path, arm: str, rnd: int, cap: int, datasets: list[s
     cfg.sampling.max_new_tokens = cap
     # Same headroom rule as the existing configs (8192 -> 16384, 16384 -> 24576).
     cfg.engine.max_model_len = max(int(cfg.engine.max_model_len), cap + 8192)
+    if num_samples is not None:
+        # Stamp the override where the stage reads protocols from: cfg.eval
+        # for the monitor set, cfg.eval_sets.<name> for named sets.
+        cfg.eval.num_samples = num_samples
+        cfg.eval_sets = {}
+        for dataset in datasets:
+            if dataset != str(cfg.eval.dataset):
+                _, _, eval_cfg = eval_protocol(cfg, dataset)
+                eval_cfg.num_samples = num_samples
+                cfg.eval_sets[dataset] = eval_cfg
     OmegaConf.save(config=cfg, f=derived / "resolved_config.yaml", resolve=True)
 
     pool = derived / "pool"
@@ -101,16 +119,16 @@ def prepare_run_dir(source: Path, arm: str, rnd: int, cap: int, datasets: list[s
             continue
         source_pool = source / "pool" / pool_file
         if source_pool.exists():
-            # The monitor set: keep problem_index -> problem identical to the
-            # run's own evals rather than re-deriving it from the Hub.
+            # Keep problem_index -> question identical to the run's own
+            # evals rather than re-deriving it from the Hub.
             target.symlink_to(source_pool.resolve())
             log(f"pool: {pool_file} -> {source_pool}")
             continue
-        problems = load_examples(
+        questions = load_examples(
             str(eval_cfg.dataset), n=int(eval_cfg.num_problems), seed=int(cfg.seed)
         )
-        write_jsonl(target, problems)
-        log(f"pool: wrote {len(problems)} problems to {target}")
+        write_jsonl(target, questions)
+        log(f"pool: wrote {len(questions)} questions to {target}")
 
     src_ckpt = paths.checkpoint_dir(source, arm, rnd).resolve()
     if not any(src_ckpt.glob("*.safetensors")):
@@ -155,27 +173,27 @@ def run_stage(derived: Path, arm: str, stage_round: int, dataset: str, gpus: lis
 # --- scoring -----------------------------------------------------------------
 
 
-def bootstrap_ci(per_problem: np.ndarray, resamples: int, seed: int = 0) -> tuple[float, float]:
-    """Problem-level cluster bootstrap: a problem's k samples move together."""
+def bootstrap_ci(per_question: np.ndarray, resamples: int, seed: int = 0) -> tuple[float, float]:
+    """Question-level cluster bootstrap: a question's k samples move together."""
 
     rng = np.random.default_rng(seed)
-    draws = rng.integers(0, len(per_problem), size=(resamples, len(per_problem)))
-    means = per_problem[draws].mean(axis=1)
+    draws = rng.integers(0, len(per_question), size=(resamples, len(per_question)))
+    means = per_question[draws].mean(axis=1)
     lo, hi = np.percentile(means, [2.5, 97.5])
     return float(lo), float(hi)
 
 
 def summarize(rows: list[dict], num_samples: int, resamples: int) -> dict:
-    by_problem: dict[int, list[dict]] = defaultdict(list)
+    by_question: dict[int, list[dict]] = defaultdict(list)
     for r in rows:
-        by_problem[r["problem_index"]].append(r)
-    short = {i: len(s) for i, s in by_problem.items() if len(s) != num_samples}
+        by_question[r["problem_index"]].append(r)
+    short = {i: len(s) for i, s in by_question.items() if len(s) != num_samples}
     if short:
-        raise RuntimeError(f"problems without exactly {num_samples} samples: {short}")
-    n, k = len(by_problem), num_samples
+        raise RuntimeError(f"questions without exactly {num_samples} samples: {short}")
+    n, k = len(by_question), num_samples
     strict = lambda r: bool(r["correct"] and r["has_boxed"])  # noqa: E731
-    avg = np.array([np.mean([strict(r) for r in s]) for s in by_problem.values()])
-    passed = np.array([float(any(strict(r) for r in s)) for s in by_problem.values()])
+    avg = np.array([np.mean([strict(r) for r in s]) for s in by_question.values()])
+    passed = np.array([float(any(strict(r) for r in s)) for s in by_question.values()])
     p = float(avg.mean())
     return {
         "num_problems": n,
@@ -195,7 +213,7 @@ def summarize(rows: list[dict], num_samples: int, resamples: int) -> dict:
 def summarize_dataset(rows: list[dict], eval_cfg, resamples: int) -> dict:
     k, n = int(eval_cfg.num_samples), int(eval_cfg.num_problems)
     if len(rows) != n * k:
-        raise RuntimeError(f"{len(rows)} rows, expected {n} problems x {k} samples = {n * k}")
+        raise RuntimeError(f"{len(rows)} rows, expected {n} questions x {k} samples = {n * k}")
     summary = summarize(rows, k, resamples)
     by_source: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
@@ -224,8 +242,14 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--arm", required=True)
     parser.add_argument("--round", type=int, default=None, dest="round_index",
-                        help="evaluate round_R/checkpoint (default: newest round with weights)")
-    parser.add_argument("--max-new-tokens", type=int, default=16384)
+                        help="evaluate round_R/checkpoint, R being the checkpoint directory "
+                             "index (default: newest with weights)")
+    parser.add_argument("--max-new-tokens", type=int, default=None,
+                        help="generation cap (default: the run's sampling.max_new_tokens; "
+                             "16384 for a headline table)")
+    parser.add_argument("--num-samples", type=int, default=None,
+                        help="samples per question for EVERY listed dataset (default: each "
+                             "set's own protocol -- MATH-500 4, AIME 16)")
     parser.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS),
                         help="eval set keys (conf/eval/<name>.yaml or the run's monitor set)")
     parser.add_argument("--gpus", default=None,
@@ -238,11 +262,11 @@ def main() -> None:
     gpus = (args.gpus or ",".join(str(k) for k in range(int(cfg.num_gpus)))).split(",")
     rnd = args.round_index if args.round_index is not None else latest_checkpoint_round(source, args.arm)
     stage_round = rnd + 1
-    cap = args.max_new_tokens
+    cap = args.max_new_tokens or int(cfg.sampling.max_new_tokens)
 
-    derived = prepare_run_dir(source, args.arm, rnd, cap, args.datasets)
+    derived = prepare_run_dir(source, args.arm, rnd, cap, args.datasets, args.num_samples)
     checkpoint = paths.checkpoint_dir(source, args.arm, rnd)
-    log(f"{args.arm} round_{rnd:02d}/checkpoint at cap {cap} on {gpus} -> {derived}")
+    log(f"{args.arm} round_{rnd:02d}/checkpoint at cap {cap} on GPUs {gpus} -> {derived}")
     for dataset in args.datasets:
         run_stage(derived, args.arm, stage_round, dataset, gpus)
 

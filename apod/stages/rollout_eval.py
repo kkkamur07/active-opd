@@ -6,8 +6,8 @@ eval-only round). Written against ``docs/pipeline.md``; loads
 ``<run-dir>/resolved_config.yaml`` with ``OmegaConf.load`` (stages are plain
 scripts, not Hydra apps). The driver launches one process per shard with
 ``CUDA_VISIBLE_DEVICES`` set to that shard's GPU. ``--eval-dataset <name>``
-evaluates a named set (``conf/eval/<name>.yaml``) into ``eval_<name>/`` instead
-of the monitor set's ``eval/`` (terminal evals, ``scripts/terminal_eval.py``).
+evaluates a named set (``conf/eval/<name>.yaml``, e.g. the AIME 2025+2026
+monitor) into ``eval_<name>/`` instead of the MATH-500 ``eval/``.
 
 Seeds:
   eval     -- deterministic per (round, problem):
@@ -124,10 +124,9 @@ def parse_args(argv: list[str] | None):
     parser.add_argument(
         "--eval-dataset",
         default=None,
-        help="named eval set (conf/eval/<name>.yaml); default cfg.eval.dataset, "
-        "the per-round monitor. A non-default set reads "
-        "pool/eval_problems_<name>.jsonl and writes eval_<name>/ "
-        "(see select_eval_set)",
+        help="named eval set (conf/eval/<name>.yaml); default cfg.eval.dataset "
+        "(MATH-500). A non-default set reads pool/eval_problems_<name>.jsonl "
+        "and writes eval_<name>/ (see select_eval_set)",
     )
     return parse_stage_args(parser, argv)
 
@@ -137,19 +136,24 @@ def select_eval_set(cfg, name: str | None) -> tuple[str, str]:
 
     The default (``cfg.eval.dataset``) keeps the ``eval/`` +
     ``pool/eval_problems.jsonl`` layout byte-identical. A named set swaps
-    ``cfg.eval`` for that benchmark's own protocol (``conf/eval/<name>.yaml``:
-    num_problems, num_samples, eval_seed_offset) and goes to ``eval_<name>/``
-    + ``pool/eval_problems_<name>.jsonl``, which the launcher
-    (``scripts/terminal_eval.py``) materializes, like the driver does for the
-    monitor set.
+    ``cfg.eval`` for that benchmark's protocol (num_problems, num_samples,
+    eval_seed_offset) -- ``cfg.eval_sets.<name>`` when the launcher stamped
+    one into resolved_config.yaml (scripts/terminal_eval.py --num-samples),
+    else ``conf/eval/<name>.yaml`` -- and goes to ``eval_<name>/`` +
+    ``pool/eval_problems_<name>.jsonl``, which the launcher materializes like
+    the driver does for the monitor set.
     """
 
     if name is None or name == str(cfg.eval.dataset):
         return "eval", "eval_problems.jsonl"
-    conf = Path(__file__).resolve().parents[2] / "conf" / "eval" / f"{name}.yaml"
-    if not conf.exists():
-        raise FileNotFoundError(f"no eval protocol for {name!r}: {conf}")
-    cfg.eval = OmegaConf.load(conf)
+    stamped = cfg.get("eval_sets", {}).get(name)
+    if stamped is not None:
+        cfg.eval = stamped
+    else:
+        conf = Path(__file__).resolve().parents[2] / "conf" / "eval" / f"{name}.yaml"
+        if not conf.exists():
+            raise FileNotFoundError(f"no eval protocol for {name!r}: {conf}")
+        cfg.eval = OmegaConf.load(conf)
     return f"eval_{name}", f"eval_problems_{name}.jsonl"
 
 

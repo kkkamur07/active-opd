@@ -1,22 +1,22 @@
-# AIME 2025 + 2026 pooled terminal eval (ADR 0005). Not a per-round monitor:
-# at the training cap (8192) a 30-problem set is mostly truncation, and it
-# cannot separate arms round-to-round (naive SE ~2 pts at 60x16). It runs
-# once per final checkpoint through scripts/terminal_eval.py, which passes
-# --eval-dataset aime2526 to apod.stages.rollout_eval; the stage then reads
-# pool/eval_problems_aime2526.jsonl and writes eval_aime2526/, leaving the
-# MATH-500 eval/ layout untouched.
-# Sampling params are shared with rollouts (conf/sampling) on purpose -- do
-# not add eval-specific sampling here. Only the cap differs (terminal_eval
-# --max-new-tokens, default 16384) and it is stamped into the derived run's
-# resolved_config.yaml.
+# AIME 2025 + 2026 pooled monitor (ADR 0006). Runs alongside MATH-500 at
+# every refresh (eval + re-rollout every 10 training steps), at the RUN cap
+# (sampling.max_new_tokens, 8192): apod.stages.rollout_eval --eval-only
+# --eval-dataset aime2526 reads pool/eval_problems_aime2526.jsonl and writes
+# eval_aime2526/ next to the MATH-500 eval/, whose layout is untouched.
+# 30 questions per year is too few to separate arms on its own (naive SE
+# ~2 pts at 60x16, between-question variance larger still): quote the
+# cluster-bootstrap interval and let MATH-500 carry arm-vs-arm claims.
+# A headline table at a longer cap (16384) comes from scripts/terminal_eval.py
+# --max-new-tokens; sampling params otherwise stay shared with rollouts
+# (conf/sampling) -- do not add eval-specific sampling here.
 dataset: aime2526                # key into apod.datasets.load.COMBINED (30 + 30)
 num_problems: 60                 # the whole pooled set; ids keep aime2025:/aime2026: prefixes
-num_samples: 16                  # samples per problem -> avg@16 / pass@16 (960 trials)
-# Same field as math500.yaml so the schema is uniform; the terminal eval
-# always runs the full set (the stage is launched without --eval-num-problems).
+num_samples: 16                  # samples per question -> avg@16 / pass@16 (960 trials)
+# Same field as math500.yaml so the schema is uniform; the set is small
+# enough that every refresh runs all 60 questions.
 intermediate_num_problems: 60
-# Per-problem seeds follow the MATH-500 rule exactly:
-#   seed + eval_seed_offset + round * num_problems + problem_index
+# Per-question seeds follow the MATH-500 rule exactly:
+#   seed + eval_seed_offset + refresh_index * num_problems + problem_index
 # (apod.stages.rollout_eval.run_eval), so a re-run of the same checkpoint
-# reproduces sample-for-sample and rounds differ.
+# reproduces sample-for-sample and refreshes differ.
 eval_seed_offset: 100000
