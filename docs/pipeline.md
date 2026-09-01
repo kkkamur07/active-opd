@@ -30,7 +30,7 @@ outputs/runs/<run_name>/
   resolved_config.yaml            # OmegaConf dump; stages read THIS, not conf/
   pool/prompts.jsonl
   metrics.jsonl                   # one row per (arm, round); driver appends
-  plots/accuracy_vs_trajectories.png
+  plots/accuracy_vs_steps.png
   arms/<arm>/rounds/round_XX/
     manifest.json                 # driver: config stamp, timings, throughput
     eval/eval.shard{K}.jsonl
@@ -113,8 +113,8 @@ python -m apod.stages.train        --run-dir D --arm A --round R
     trajectories; writes checkpoint/ + train/log_history.jsonl + summary
 python -m apod.main            (Hydra app, conf/config.yaml)
 python -m apod.plotting        --run-dir D
-    reads metrics.jsonl -> plots/accuracy_vs_trajectories.png; one curve
-    per arm, x = trajectories_cumulative, y = avg_at_n
+    reads metrics.jsonl -> plots/accuracy_vs_steps.png; one curve per arm,
+    x = training step (trajectories / effective_batch, 32), y = avg_at_n
 ```
 
 ## Selection interface (`apod/selection.py`)

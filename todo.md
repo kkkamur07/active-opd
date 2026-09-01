@@ -17,7 +17,8 @@ Being implemented now. Not yet run, so there are no numbers for any of the three
 
 - [ ] Generate `Qwen/Qwen3.5-9B` teacher trajectories over the same prompts, via vLLM,
       with the same sampling settings as the student
-      (`temperature=1.0, top_p=0.95, top_k=20, presence_penalty=1.5`)
+      (`temperature=1.0, top_p=0.95, top_k=20`; NO presence penalty — the
+      1.5 once written here was never used, every run has presence_penalty 0.0)
 
 Practical facts for this step:
 
@@ -130,6 +131,23 @@ Not being built yet.
 
 ## Next training run: decisions (USER 2026-08-31)
 
+- [ ] **Arms: `kl_mid` vs `random` only** (USER 2026-08-31 late: "we need
+      random, it should be random vs kl mid"). Two arms, ~50 training steps
+      (3 rounds x 16 steps at eff batch 32 = 48), batch 32. No kl_high /
+      kl_low this run; no teacher-rollout block and no teacher-pool
+      rescoring (those were diagnostics, not mechanism — see below).
+- [ ] **MC reverse-KL scoring — TODO ONLY, explicitly NOT this run** (USER
+      2026-08-31: "a lot of them just do mc reverse kl — add this todo but we
+      are not doing this"). Replace the exact full-vocab reverse KL with the
+      sampled-token estimate log pi_S(y_t) - log pi_T(y_t) averaged over the
+      trajectory: student side free from vLLM at generation time, teacher
+      side one vLLM prefill pass (prompt_logprobs) at ~2-3x the current
+      scoring throughput (~25 min vs ~72 min per round-arm). CAVEAT: not an
+      unbiased estimator of mean KL (sampling is top_k/top_p-truncated
+      student, not the full student), so it changes the selection statistic.
+      Before ever adopting: validate offline against the stored exact KL on
+      the oracle16k round-0 pool (per-prompt Spearman + tertile agreement;
+      analysis machinery already in scripts/oracle_kl.py --analyze).
 - [ ] **No `all` control arm next run** (USER 2026-08-31: "this time we are not
       going to do the comparison with all"). The all-12-rollouts arm was the
       no-selection baseline in oracle16k (1536 rows, 48 steps/round, 3x the
@@ -140,6 +158,30 @@ Not being built yet.
   already 2 per-device x 8 accum x 2 ranks = 32 (raised from 16 on
   2026-08-15, asserted via train.effective_batch). The "16" is the bucket
   arms' optimizer steps per round (512 trajectories / 32), not the batch.
+
+## Optimizer-state persistence across rounds (USER 2026-09-01)
+
+- [x] **IMPLEMENTED 2026-09-01 in the kl50w run** (`--kl50w` in
+      scripts/bucket_experiment.py + `train.persist_optimizer` in
+      apod/stages/train.py): Adam state saved per arm per round
+      (name-keyed, remapped on load so restarts work at any round
+      boundary), per-round warmup(2)+cosine-to-10% LR cycles, peak LR
+      picked by a 3-candidate probe (2e-5 / 1e-5 / 5e-6) on the real
+      round-0 kl_high selection. Round 0 banked from kl50.
+- [ ] **Keep the optimizer states across rounds** — "we need to keep the
+      optimizer states as well - this will make a consistent run with lr
+      cycles - because apparently it helps the student." Today each round's
+      train stage builds a fresh GKDTrainer from weights only (no
+      resume_from_checkpoint, save_strategy 'no'), so Adam's m/v and step
+      counter reset every round; the t=1 bias-corrected update is a
+      magnitude-blind sign step, producing the measured step-2 loss/grad-norm
+      spike each round (kl50: grad_norm 0.56 -> 6.12 at r1 restart).
+      A warmup_steps=2 + constant_with_warmup patch was verified to absorb it
+      (kl50 round-2: no spike, grad_norm 0.53; warmup-trained artifacts kept
+      in outputs/runs/kl50_warmup_backup/) but was trained OUT of kl50 the
+      same day so all rounds share one optimizer regime. The durable fix is
+      saving/loading optimizer state per arm per round + an LR schedule
+      spanning rounds ("lr cycles").
 
 ## Infrastructure notes (2026-08-14)
 

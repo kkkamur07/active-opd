@@ -82,9 +82,15 @@ def out_path(args, shard: int) -> Path:
     return base / f"oracle_kl.shard{shard}.jsonl"
 
 
+MAX_BATCH = 4  # same-length rollouts scored per forward; bounds the fp32
+               # chunk transients at ~4 GiB per model
+
+
 def compute(args) -> None:
     import torch
     from transformers import AutoModelForCausalLM
+
+    from apod.stages.entropy import _decoder_and_head
 
     device = "cuda"
     tokens_dir = args.tokens_dir if args.tokens_dir is not None else round_dir(args) / "rollouts" / "tokens"
@@ -108,6 +114,11 @@ def compute(args) -> None:
     student = AutoModelForCausalLM.from_pretrained(
         args.student_path, dtype=torch.bfloat16, device_map=device
     ).eval()
+    # Split body/head so the full [T, 248k] logit tensor (8 GiB bf16 at 16k
+    # tokens) never materialises: run each decoder once, apply the head per
+    # position chunk. Same pattern as the entropy stage; identical numbers.
+    t_body, t_head = _decoder_and_head(teacher)
+    s_body, s_head = _decoder_and_head(student)
 
     with out.open("a") as f:
         for npz_path in npzs:
@@ -117,73 +128,85 @@ def compute(args) -> None:
                 rlens = d["response_lengths"]
                 plen = int(d["prompt_length"])
                 truncated = d["truncated"]
+            # Rollouts of one example share the prompt, so same TOTAL length
+            # means identical shape: batch those without any padding or mask.
+            by_length: dict[int, list[int]] = defaultdict(list)
             for k in range(ids_all.shape[0]):
-                if (example_index, k) in done:
-                    continue
-                rlen = int(rlens[k])
-                ids = torch.tensor(ids_all[k, : plen + rlen][None], device=device)
-                with torch.no_grad():
-                    t_logits = teacher(input_ids=ids).logits[0]
-                    s_logits = student(input_ids=ids).logits[0]
-                # Reverse KL at response positions: prediction at position t-1
-                # scores the token emitted at t, so slice [plen-1, plen+rlen-1).
-                rkl_sum, fkl_sum, sent_sum, tent_sum, n = 0.0, 0.0, 0.0, 0.0, 0
-                isz_sum, adv_sum, adv_n = 0.0, 0.0, 0
-                for lo in range(plen - 1, plen + rlen - 1, POSITION_CHUNK):
-                    hi = min(lo + POSITION_CHUNK, plen + rlen - 1)
-                    lp_s = torch.log_softmax(s_logits[lo:hi].float(), dim=-1)
-                    lp_t = torch.log_softmax(t_logits[lo:hi].float(), dim=-1)
-                    diff = lp_s - lp_t
-                    rkl = (lp_s.exp() * diff).sum(-1)   # KL(S||T) per position
-                    fkl = (lp_t.exp() * -diff).sum(-1)  # KL(T||S) per position
-                    rkl_sum += float(rkl.sum())
-                    fkl_sum += float(fkl.sum())
-                    # Mean token entropies of both models on the same positions
-                    # (student entropy cross-checks the entropy stage's stored
-                    # scores; teacher entropy is new signal).
-                    sent_sum += float(-(lp_s.exp() * lp_s).sum(-1).sum())
-                    tent_sum += float(-(lp_t.exp() * lp_t).sum(-1).sum())
-                    n += rkl.shape[0]
-                    # Top-16 head agreement (Eq. 6-7): |A cap B| where A/B are
-                    # the student's/teacher's top-16 ids, and the teacher's
-                    # advantage on the intersection with BOTH distributions
-                    # renormalized over it. A position with an empty
-                    # intersection contributes to the ratio but not the mean
-                    # advantage.
-                    sv, si = lp_s.topk(K_OVERLAP, dim=-1)
-                    ti = lp_t.topk(K_OVERLAP, dim=-1).indices
-                    in_both = (si.unsqueeze(-1) == ti.unsqueeze(1)).any(-1)
-                    isz = in_both.sum(-1)
-                    t_at_s = lp_t.gather(-1, si)
-                    lp_bar = sv - sv.masked_fill(~in_both, float("-inf")).logsumexp(-1, keepdim=True)
-                    lq_bar = t_at_s - t_at_s.masked_fill(~in_both, float("-inf")).logsumexp(-1, keepdim=True)
-                    term = (lp_bar.exp() * (lq_bar - lp_bar)).masked_fill(~in_both, 0.0)
-                    valid = isz > 0
-                    isz_sum += float(isz.sum())
-                    adv_sum += float((term.sum(-1) / isz.clamp(min=1))[valid].sum())
-                    adv_n += int(valid.sum())
-                    del lp_s, lp_t, diff, rkl, fkl
-                    del sv, si, ti, in_both, isz, t_at_s, lp_bar, lq_bar, term, valid
-                del t_logits, s_logits
-                torch.cuda.empty_cache()
-                f.write(
-                    json.dumps(
-                        {
-                            "example_index": example_index,
-                            "rollout_index": k,
-                            "mean_reverse_kl": rkl_sum / max(n, 1),
-                            "mean_forward_kl": fkl_sum / max(n, 1),
-                            "student_entropy": sent_sum / max(n, 1),
-                            "teacher_entropy": tent_sum / max(n, 1),
-                            "overlap_ratio_top16": isz_sum / max(n * K_OVERLAP, 1),
-                            "overlap_adv_top16": adv_sum / max(adv_n, 1),
-                            "response_length": rlen,
-                            "truncated": bool(truncated[k]),
-                        }
+                if (example_index, k) not in done:
+                    by_length[plen + int(rlens[k])].append(k)
+            for total, ks in sorted(by_length.items()):
+                for group_start in range(0, len(ks), MAX_BATCH):
+                    group = ks[group_start : group_start + MAX_BATCH]
+                    rlen = total - plen
+                    ids = torch.as_tensor(
+                        np.asarray(ids_all[group, :total], dtype=np.int64), device=device
                     )
-                    + "\n"
-                )
-                f.flush()
+                    with torch.no_grad():
+                        t_hidden = t_body(input_ids=ids, use_cache=False)
+                        t_hidden = t_hidden[0] if isinstance(t_hidden, tuple) else t_hidden.last_hidden_state
+                        s_hidden = s_body(input_ids=ids, use_cache=False)
+                        s_hidden = s_hidden[0] if isinstance(s_hidden, tuple) else s_hidden.last_hidden_state
+                        b = len(group)
+                        # Reverse KL at response positions: prediction at t-1
+                        # scores the token emitted at t -> [plen-1, total-1).
+                        rkl_sum = torch.zeros(b, device=device)
+                        fkl_sum = torch.zeros(b, device=device)
+                        sent_sum = torch.zeros(b, device=device)
+                        tent_sum = torch.zeros(b, device=device)
+                        isz_sum = torch.zeros(b, device=device)
+                        adv_sum = torch.zeros(b, device=device)
+                        adv_n = torch.zeros(b, device=device)
+                        n = 0
+                        for lo in range(plen - 1, total - 1, POSITION_CHUNK):
+                            hi = min(lo + POSITION_CHUNK, total - 1)
+                            lp_s = torch.log_softmax(s_head(s_hidden[:, lo:hi]).float(), dim=-1)
+                            lp_t = torch.log_softmax(t_head(t_hidden[:, lo:hi]).float(), dim=-1)
+                            diff = lp_s - lp_t
+                            rkl_sum += (lp_s.exp() * diff).sum(-1).sum(-1)   # KL(S||T)
+                            fkl_sum += (lp_t.exp() * -diff).sum(-1).sum(-1)  # KL(T||S)
+                            # Mean token entropies of both models on the same
+                            # positions (student entropy cross-checks the
+                            # entropy stage; teacher entropy is new signal).
+                            sent_sum += -(lp_s.exp() * lp_s).sum(-1).sum(-1)
+                            tent_sum += -(lp_t.exp() * lp_t).sum(-1).sum(-1)
+                            n += hi - lo
+                            # Top-16 head agreement (Eq. 6-7): |A cap B| where
+                            # A/B are the student's/teacher's top-16 ids, and
+                            # the teacher's advantage on the intersection with
+                            # BOTH distributions renormalized over it. A
+                            # position with an empty intersection contributes
+                            # to the ratio but not the mean advantage.
+                            sv, si = lp_s.topk(K_OVERLAP, dim=-1)
+                            ti = lp_t.topk(K_OVERLAP, dim=-1).indices
+                            in_both = (si.unsqueeze(-1) == ti.unsqueeze(-2)).any(-1)
+                            isz = in_both.sum(-1)
+                            t_at_s = lp_t.gather(-1, si)
+                            lp_bar = sv - sv.masked_fill(~in_both, float("-inf")).logsumexp(-1, keepdim=True)
+                            lq_bar = t_at_s - t_at_s.masked_fill(~in_both, float("-inf")).logsumexp(-1, keepdim=True)
+                            term = (lp_bar.exp() * (lq_bar - lp_bar)).masked_fill(~in_both, 0.0)
+                            valid = isz > 0
+                            isz_sum += isz.sum(-1).float()
+                            adv_sum += (term.sum(-1) / isz.clamp(min=1)).masked_fill(~valid, 0.0).sum(-1)
+                            adv_n += valid.sum(-1).float()
+                    for row, k in enumerate(group):
+                        f.write(
+                            json.dumps(
+                                {
+                                    "example_index": example_index,
+                                    "rollout_index": k,
+                                    "mean_reverse_kl": float(rkl_sum[row]) / max(n, 1),
+                                    "mean_forward_kl": float(fkl_sum[row]) / max(n, 1),
+                                    "student_entropy": float(sent_sum[row]) / max(n, 1),
+                                    "teacher_entropy": float(tent_sum[row]) / max(n, 1),
+                                    "overlap_ratio_top16": float(isz_sum[row]) / max(n * K_OVERLAP, 1),
+                                    "overlap_adv_top16": float(adv_sum[row]) / max(float(adv_n[row]), 1.0),
+                                    "response_length": rlen,
+                                    "truncated": bool(truncated[k]),
+                                }
+                            )
+                            + "\n"
+                        )
+                    f.flush()
             print(f"example {example_index} done", flush=True)
 
 

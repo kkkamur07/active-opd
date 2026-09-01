@@ -35,6 +35,8 @@ import os
 import sys
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+from itertools import repeat
 from pathlib import Path
 from typing import Any
 
@@ -240,7 +242,9 @@ def _sampling_kwargs(cfg) -> dict[str, Any]:
     }
 
 
-def run_eval(llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemoryProbe) -> None:
+def run_eval(
+    llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemoryProbe, graders
+) -> None:
     eval_path = eval_dir / f"eval.shard{args.shard}.jsonl"
     num_samples = int(cfg.eval.num_samples)
     chunk_size = max(1, int(cfg.engine.target_concurrent_sequences) // num_samples)
@@ -277,32 +281,45 @@ def run_eval(llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemo
         memory.sample()
 
         chunk_tokens = 0
-        for (problem_index, example), request_output in zip(chunk, outputs):
-            for sample_index, completion in enumerate(request_output.outputs):
-                truncated = completion.finish_reason == "length"
-                verdict = grade(str(completion.text), example["answer"])
-                chunk_tokens += len(completion.token_ids)
-                response_tokens += len(completion.token_ids)
-                n_correct += int(verdict["correct"])
-                n_total += 1
-                n_truncated += int(truncated)
-                append_jsonl(
-                    eval_path,
-                    {
-                        "problem_index": problem_index,
-                        "sample_index": sample_index,
-                        "id": example["id"],
-                        "response_length": len(completion.token_ids),
-                        "truncated": bool(truncated),
-                        "correct": bool(verdict["correct"]),
-                        # Distinguishes "answered wrong" from "output became
-                        # unparseable" -- a template/thinking regression would
-                        # otherwise look identical to a capability drop.
-                        "has_answer": bool(verdict["has_answer"]),
-                        "has_boxed": bool(verdict["has_boxed"]),
-                        "gold_parsed": bool(verdict["gold_parsed"]),
-                    },
-                )
+        # Grade the whole chunk in worker processes (math-verify is CPU-bound
+        # sympy with signal-based timeouts, so processes, not threads); the
+        # GPU otherwise idles ~34 ms per sample while grading runs serially.
+        flat = [
+            (problem_index, example, sample_index, completion)
+            for (problem_index, example), request_output in zip(chunk, outputs)
+            for sample_index, completion in enumerate(request_output.outputs)
+        ]
+        verdicts = list(
+            graders.map(
+                grade,
+                (str(c.text) for _, _, _, c in flat),
+                (ex["answer"] for _, ex, _, _ in flat),
+            )
+        )
+        for (problem_index, example, sample_index, completion), verdict in zip(flat, verdicts):
+            truncated = completion.finish_reason == "length"
+            chunk_tokens += len(completion.token_ids)
+            response_tokens += len(completion.token_ids)
+            n_correct += int(verdict["correct"])
+            n_total += 1
+            n_truncated += int(truncated)
+            append_jsonl(
+                eval_path,
+                {
+                    "problem_index": problem_index,
+                    "sample_index": sample_index,
+                    "id": example["id"],
+                    "response_length": len(completion.token_ids),
+                    "truncated": bool(truncated),
+                    "correct": bool(verdict["correct"]),
+                    # Distinguishes "answered wrong" from "output became
+                    # unparseable" -- a template/thinking regression would
+                    # otherwise look identical to a capability drop.
+                    "has_answer": bool(verdict["has_answer"]),
+                    "has_boxed": bool(verdict["has_boxed"]),
+                    "gold_parsed": bool(verdict["gold_parsed"]),
+                },
+            )
 
         generate_seconds += seconds
         generated_tokens += chunk_tokens
@@ -331,7 +348,8 @@ def run_eval(llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemo
 
 
 def run_rollouts(
-    llm, tokenizer, cfg, args, rollouts_dir: Path, pending, model_path: str, memory: GpuMemoryProbe
+    llm, tokenizer, cfg, args, rollouts_dir: Path, pending, model_path: str,
+    memory: GpuMemoryProbe, graders,
 ) -> None:
     traj_path = rollouts_dir / f"trajectories.shard{args.shard}.jsonl"
     tokens_dir = rollouts_dir / "tokens"
@@ -393,7 +411,9 @@ def run_rollouts(
         n_repaired += ensure_trailing_eos(batch, eos_ids, eos_id, pad_id)
         save_npz(tokens_dir / f"example_{example_index:05d}.npz", batch)
 
-        grades = [grade(str(response), row["reference"]) for response in batch["responses"]]
+        grades = list(
+            graders.map(grade, (str(r) for r in batch["responses"]), repeat(row["reference"]))
+        )
         n_correct += sum(g["correct"] for g in grades)
         n_total += len(grades)
         n_truncated += int(batch["truncated"].sum())
@@ -537,6 +557,10 @@ def main(argv: list[str] | None = None) -> int:
     if eval_pending or rollout_pending:
         memory = GpuMemoryProbe()
         memory.sample()
+        # Fork the grading workers BEFORE the engine exists so the children
+        # never inherit a CUDA context; grade() is pure CPU (sympy).
+        graders = ProcessPoolExecutor(max_workers=8)
+        list(graders.map(grade, [""] * 8, ["0"] * 8))  # force all forks now
         llm = build_llm(
             model_path,
             max_model_len=int(cfg.engine.max_model_len),
@@ -547,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         tokenizer = llm.get_tokenizer()
 
         if eval_pending:
-            run_eval(llm, tokenizer, cfg, args, eval_dir, eval_pending, memory)
+            run_eval(llm, tokenizer, cfg, args, eval_dir, eval_pending, memory, graders)
         else:
             print("eval: nothing pending", flush=True)
         eval_marker.touch()
@@ -555,11 +579,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.eval_only:
             if rollout_pending:
                 run_rollouts(
-                    llm, tokenizer, cfg, args, rollouts_dir, rollout_pending, model_path, memory
+                    llm, tokenizer, cfg, args, rollouts_dir, rollout_pending, model_path,
+                    memory, graders,
                 )
             else:
                 print("rollouts: nothing pending", flush=True)
             rollout_marker.touch()
+        graders.shutdown()
 
         memory.sample()
         if memory.gib():

@@ -1,14 +1,17 @@
-"""Plot MATH-500 accuracy vs trajectories trained (contract: docs/pipeline.md).
+"""Plot MATH-500 accuracy vs training step (contract: docs/pipeline.md).
 
-Reads metrics.jsonl and renders plots/accuracy_vs_trajectories.png: one curve
+Reads metrics.jsonl and renders plots/accuracy_vs_steps.png: one curve
 per arm, avg@n on top, pass@n below (dashed) as two stacked panels sharing the
 x-axis -- never a dual-axis chart.
 
-X-axis semantics: row r's eval measured the model BEFORE round r's training,
-while trajectories_cumulative includes round r's selection. So every point sits
-at x = trajectories_cumulative - trajectories_round: the round-0 row lands on
-x=0 (untrained anchor) and the final eval-only row (trajectories_round=0) lands
-at the full cumulative count -- one uniform rule, no special-casing.
+X-axis semantics: one training step = one optimizer step at the effective
+batch (cfg.train.effective_batch, asserted 32 by the train stage), so
+step = trajectories / effective_batch. Row r's eval measured the model BEFORE
+round r's training, while trajectories_cumulative includes round r's
+selection. So every point sits at x = (trajectories_cumulative -
+trajectories_round) / effective_batch: the round-0 row lands on x=0
+(untrained anchor) and the final eval-only row (trajectories_round=0) lands
+at the full cumulative step count -- one uniform rule, no special-casing.
 """
 
 from __future__ import annotations
@@ -70,11 +73,13 @@ def plot_results(run_dir: Path) -> Path:
 
     run_name = run_dir.name
     num_samples = None
+    eff_batch = 32
     cfg_path = run_dir / "resolved_config.yaml"
     if cfg_path.exists():
         cfg = OmegaConf.load(cfg_path)
         run_name = str(cfg.get("run_name", run_name))
         num_samples = cfg.eval.num_samples if "eval" in cfg else None
+        eff_batch = int(cfg.train.get("effective_batch", eff_batch)) if "train" in cfg else eff_batch
     n_label = str(num_samples) if num_samples is not None else "n"
 
     # Preserve first-seen arm order (driver writes arms in cfg.arms order).
@@ -92,7 +97,8 @@ def plot_results(run_dir: Path) -> Path:
         # Row r evaluated the pre-training model, so subtract the trajectories
         # this round added; see module docstring.
         xs = [
-            r["trajectories_cumulative"] - (r["trajectories_round"] or 0) for r in arm_rows
+            (r["trajectories_cumulative"] - (r["trajectories_round"] or 0)) / eff_batch
+            for r in arm_rows
         ]
         color = _arm_color(arm, overflow)
         ax_avg.plot(
@@ -130,9 +136,9 @@ def plot_results(run_dir: Path) -> Path:
     _style_axis(ax_pass)
     ax_avg.set_ylabel(f"avg@{n_label}", color=INK_SECONDARY)
     ax_pass.set_ylabel(f"pass@{n_label}", color=INK_SECONDARY)
-    ax_pass.set_xlabel("Trajectories trained before eval", color=INK_SECONDARY)
+    ax_pass.set_xlabel(f"training step (batch={eff_batch})", color=INK_SECONDARY)
     ax_avg.set_title(
-        f"{run_name}: MATH-500 accuracy vs trajectories trained (n={n_label})",
+        f"{run_name}: MATH-500 accuracy vs training step (n={n_label})",
         color=INK_PRIMARY,
         fontsize=12,
         loc="left",
@@ -146,7 +152,7 @@ def plot_results(run_dir: Path) -> Path:
     )
     ax_avg.margins(x=0.12)  # room for the direct labels past the last point
 
-    out_path = run_dir / "plots" / "accuracy_vs_trajectories.png"
+    out_path = run_dir / "plots" / "accuracy_vs_steps.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, facecolor=SURFACE, bbox_inches="tight")

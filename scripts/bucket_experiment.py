@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -109,10 +110,16 @@ LR_OVERRIDE: float | None = None  # --lr: round-3 extension runs at the LR the
 
 
 def _write_config(dst: Path, *, student_id: str, num_rollouts: int,
-                  seed: int | None = None, cap: int = 16384) -> None:
+                  seed: int | None = None, cap: int = 16384,
+                  num_prompts: int | None = None,
+                  gpu_mem: float | None = None) -> None:
     cfg = OmegaConf.load(SOURCE_RUN / "resolved_config.yaml")
     cfg.model.student_id = student_id
     cfg.rollout.num_rollouts = num_rollouts
+    if num_prompts is not None:
+        cfg.rollout.num_prompts = num_prompts
+    if gpu_mem is not None:
+        cfg.engine.gpu_memory_utilization = gpu_mem
     if seed is not None:
         cfg.seed = seed
         cfg.train.seed = seed  # resolved_config stores ${seed} resolved
@@ -172,7 +179,13 @@ def run_rollout_eval(run_dir: Path, arm: str, rnd: int, *, eval_only: bool) -> N
 
 
 def _score_count(out_dir: Path) -> int:
-    return sum(len(read_jsonl(p)) for p in out_dir.glob("oracle_kl.shard*.jsonl"))
+    # Distinct trajectories, not raw lines: a resume re-scores rows that
+    # predate the Eq. 6-7 fields and APPENDS, so line count can reach
+    # `expected` while trajectories are still missing.
+    keys = set()
+    for p in out_dir.glob("oracle_kl.shard*.jsonl"):
+        keys.update((r["example_index"], r["rollout_index"]) for r in read_jsonl(p))
+    return len(keys)
 
 
 def run_score(tokens_dir: Path, out_dir: Path, student_path: str, expected: int) -> None:
@@ -228,9 +241,16 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
             meta[(r["example_index"], r["rollout_index"])] = r
     by_example: dict[int, list[dict]] = defaultdict(list)
     if oracle_dir is not None:
+        # Keep the LAST row per trajectory: a resume after the Eq. 6-7
+        # fields were added re-scores pre-existing rows and APPENDS, leaving
+        # both versions in the shard files (same convention as
+        # oracle_kl --analyze; the kl50 banked round 0 hits this).
+        dedup: dict[tuple[int, int], dict] = {}
         for shard in sorted(oracle_dir.glob("oracle_kl.shard*.jsonl")):
             for r in read_jsonl(shard):
-                by_example[r["example_index"]].append(r)
+                dedup[(r["example_index"], r["rollout_index"])] = r
+        for r in dedup.values():
+            by_example[r["example_index"]].append(r)
     else:
         assert arm in ("random", "all"), f"{arm} requires a scored pool"
         for (example_index, _), r in sorted(meta.items()):
@@ -310,10 +330,12 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
 
 
 def _copy_shared_round0(src_arm: str, dst_arm: str) -> None:
-    """Round-0 pool is shared: same base policy, ONE scored pool partitioned."""
+    """Round-0 pool is shared: same base policy, ONE scored pool partitioned.
+
+    Unconditional recopy on every (re)launch: it is a few MB (tokens are
+    symlinked, not copied) and it heals a dst copied before the src gained
+    later rows -- e.g. the kl50 top-up to 136 prompts after banking 128."""
     src, dst = arm_round(RUN_DIR, src_arm, 0), arm_round(RUN_DIR, dst_arm, 0)
-    if _shards_done(dst, "eval") and _shards_done(dst, "rollouts"):
-        return
     dst.mkdir(parents=True, exist_ok=True)
     for sub in ("eval", "rollouts"):
         if (dst / sub).exists():
@@ -334,9 +356,12 @@ def _copy_shared_round0(src_arm: str, dst_arm: str) -> None:
 # selection in a throwaway run dir, take the largest that survives with peak
 # memory under a safety line. Eff batch stays 32 regardless.
 
-PROBE_DIR = ROOT / "outputs/runs/oracle16k_msmoke"
 PROBE_SECONDS = 900   # >= a few optimizer steps at 16k-token sequences
 PROBE_MEM_CAP_MIB = 75_000  # accept only if peak < ~73 GiB of 81.9k MiB
+
+
+def _probe_dir() -> Path:
+    return RUN_DIR.parent / (RUN_DIR.name + "_msmoke")
 
 
 def _gpu_peak_mib() -> int:
@@ -349,23 +374,24 @@ def _gpu_peak_mib() -> int:
 
 def _probe_one(micro: int) -> tuple[bool, int]:
     """Trial-train round-0 kl_high at this micro-batch; return (ok, peak MiB)."""
-    if PROBE_DIR.exists():
-        shutil.rmtree(PROBE_DIR)
+    probe_dir = _probe_dir()
+    if probe_dir.exists():
+        shutil.rmtree(probe_dir)
     cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
     cfg.train.per_device_train_batch_size = micro
     cfg.train.gradient_accumulation_steps = 32 // (2 * micro)
-    PROBE_DIR.mkdir(parents=True)
-    OmegaConf.save(config=cfg, f=PROBE_DIR / "resolved_config.yaml", resolve=True)
-    (PROBE_DIR / "pool").symlink_to(RUN_DIR / "pool")
+    probe_dir.mkdir(parents=True)
+    OmegaConf.save(config=cfg, f=probe_dir / "resolved_config.yaml", resolve=True)
+    (probe_dir / "pool").symlink_to(RUN_DIR / "pool")
     src = arm_round(RUN_DIR, BUCKETS[0], 0)
-    rdir = arm_round(PROBE_DIR, BUCKETS[0], 0)
+    rdir = arm_round(probe_dir, BUCKETS[0], 0)
     rdir.mkdir(parents=True)
     (rdir / "rollouts").symlink_to(src / "rollouts")
     (rdir / "selected").symlink_to(src / "selected")
     cmd = [
         sys.executable, "-m", "torch.distributed.run", "--standalone",
         "--nproc_per_node=2", "-m", "apod.stages.train",
-        "--run-dir", str(PROBE_DIR), "--arm", BUCKETS[0], "--round", "0",
+        "--run-dir", str(probe_dir), "--arm", BUCKETS[0], "--round", "0",
     ]
     log(f"micro-probe: micro {micro} x accum {32 // (2 * micro)} for up to {PROBE_SECONDS}s")
     proc = subprocess.Popen(cmd, env={**os.environ, "HF_HUB_OFFLINE": "1"})
@@ -388,27 +414,130 @@ def _probe_one(micro: int) -> tuple[bool, int]:
     return ok, peak
 
 
-def run_micro_probe() -> None:
+def _apply_micro(chosen: int) -> None:
+    cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
+    cfg.train.per_device_train_batch_size = chosen
+    cfg.train.gradient_accumulation_steps = 32 // (2 * chosen)
+    OmegaConf.save(config=cfg, f=RUN_DIR / "resolved_config.yaml", resolve=True)
+
+
+def run_micro_probe(candidates: tuple[int, ...] = (4, 2), fallback: int = 2) -> None:
     marker = RUN_DIR / "micro_probe.json"
     if marker.exists():
-        log(f"micro-probe already decided: {marker.read_text().strip()}")
+        # Re-apply on resume: _write_config rewrites resolved_config from the
+        # source defaults on every (re)launch, which would silently revert the
+        # probe's verdict otherwise.
+        chosen = json.loads(marker.read_text())["chosen_micro"]
+        _apply_micro(chosen)
+        log(f"micro-probe already decided: micro {chosen} (re-applied)")
         return
     results = {}
-    chosen = 2  # measured-safe fallback (45.3 GiB at 8192; scales to ~fit)
-    for micro in (4, 2):
+    chosen = fallback
+    for micro in candidates:
         ok, peak = _probe_one(micro)
         results[micro] = {"ok": ok, "peak_mib": peak}
         if ok:
             chosen = micro
             break
-    cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
-    cfg.train.per_device_train_batch_size = chosen
-    cfg.train.gradient_accumulation_steps = 32 // (2 * chosen)
-    OmegaConf.save(config=cfg, f=RUN_DIR / "resolved_config.yaml", resolve=True)
+    _apply_micro(chosen)
     marker.write_text(json.dumps({"chosen_micro": chosen, "results": results}) + "\n")
-    if PROBE_DIR.exists():
-        shutil.rmtree(PROBE_DIR)
+    if _probe_dir().exists():
+        shutil.rmtree(_probe_dir())
     log(f"micro-probe: locked micro {chosen} x accum {32 // (2 * chosen)} for all arms")
+
+
+# --- peak-LR probe (kl50w) --------------------------------------------------
+# OPD/GKD recipes for Qwen-scale students cluster at 5e-6..5e-5 with cosine
+# decay + short warmup (Thinking Machines OPD blog; GKD paper appendix).
+# The incumbent 2e-5 (all prior runs) is the ceiling candidate; probe each
+# candidate for ~PROBE_SECONDS of real steps on the round-0 kl_high selection
+# and pick by training-loss progress, preferring the lower LR on a near-tie
+# (three rounds of persisted Adam state compound any instability).
+
+
+def _apply_lr(chosen: float) -> None:
+    cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
+    cfg.train.learning_rate = chosen
+    OmegaConf.save(config=cfg, f=RUN_DIR / "resolved_config.yaml", resolve=True)
+
+
+def _lr_probe_one(lr: float) -> dict:
+    """Trial-train round-0 kl_high at this peak LR under the run's actual
+    schedule (warmup 2 + cosine); parse per-step loss/grad_norm from the log."""
+    probe_dir = _probe_dir()
+    if probe_dir.exists():
+        shutil.rmtree(probe_dir)
+    cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
+    cfg.train.learning_rate = lr
+    cfg.train.persist_optimizer = False  # throwaway: no state to load or keep
+    probe_dir.mkdir(parents=True)
+    OmegaConf.save(config=cfg, f=probe_dir / "resolved_config.yaml", resolve=True)
+    (probe_dir / "pool").symlink_to(RUN_DIR / "pool")
+    src = arm_round(RUN_DIR, BUCKETS[0], 0)
+    rdir = arm_round(probe_dir, BUCKETS[0], 0)
+    rdir.mkdir(parents=True)
+    (rdir / "rollouts").symlink_to(src / "rollouts")
+    (rdir / "selected").symlink_to(src / "selected")
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run", "--standalone",
+        "--nproc_per_node=2", "-m", "apod.stages.train",
+        "--run-dir", str(probe_dir), "--arm", BUCKETS[0], "--round", "0",
+    ]
+    log(f"lr-probe: lr {lr:g} for up to {PROBE_SECONDS}s")
+    plog = RUN_DIR / f"lr_probe_{lr:g}.log"
+    with plog.open("w") as f:
+        proc = subprocess.Popen(cmd, env={**os.environ, "HF_HUB_OFFLINE": "1"},
+                                stdout=f, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + PROBE_SECONDS
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(10)
+        crashed = proc.poll() is not None and proc.returncode != 0
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    time.sleep(10)  # let CUDA contexts release before the next candidate
+    text = plog.read_text()
+    # the trainer prints values as quoted strings: {'loss': '0.06174', ...}
+    losses = [float(x) for x in re.findall(r"'loss': '?([0-9.eE+-]+)", text)]
+    grads = [float(x) for x in re.findall(r"'grad_norm': '?([0-9.eE+-]+)", text)]
+    post_warmup_peak = max(grads[2:], default=0.0)
+    ok = not crashed and len(losses) >= 5 and post_warmup_peak < 5.0
+    log(f"lr-probe: lr {lr:g} -> {len(losses)} steps, last-3 losses "
+        f"{[round(x, 4) for x in losses[-3:]]}, post-warmup grad peak "
+        f"{post_warmup_peak:.2f}, " + ("crashed, " if crashed else "")
+        + ("ACCEPT" if ok else "reject"))
+    return {"lr": lr, "ok": ok, "losses": losses, "grad_norms": grads}
+
+
+def run_lr_probe(candidates: tuple[float, ...] = (2e-5, 1e-5, 5e-6),
+                 fallback: float = 2e-5) -> None:
+    marker = RUN_DIR / "lr_probe.json"
+    if marker.exists():
+        # Re-apply on resume, same reason as run_micro_probe: _write_config
+        # rewrites resolved_config from defaults on every (re)launch.
+        chosen = json.loads(marker.read_text())["chosen_lr"]
+        _apply_lr(chosen)
+        log(f"lr-probe already decided: lr {chosen:g} (re-applied)")
+        return
+    results = [_lr_probe_one(lr) for lr in candidates]
+    usable = [r for r in results if r["ok"]]
+    if usable:
+        def score(r: dict) -> float:
+            return sum(r["losses"][-3:]) / len(r["losses"][-3:])
+        best = score(min(usable, key=score))
+        # Near-tie (within 2% relative): the lower LR is the safer choice.
+        chosen = min(r["lr"] for r in usable if score(r) <= best * 1.02)
+    else:
+        chosen = fallback
+    _apply_lr(chosen)
+    marker.write_text(json.dumps({"chosen_lr": chosen, "results": results}) + "\n")
+    if _probe_dir().exists():
+        shutil.rmtree(_probe_dir())
+    log(f"lr-probe: locked peak lr {chosen:g} for all arms/rounds")
 
 
 # --- drive ------------------------------------------------------------------
@@ -479,6 +608,179 @@ def drive() -> None:
     log("drive complete")
 
 
+def prune_checkpoints(arm: str, rnd: int, keep: int = 2) -> None:
+    """Drop weight files of rounds older than the newest `keep` (resume and
+    the next round only need the latest; configs/manifests stay)."""
+    for old in range(rnd - keep + 1):
+        ckpt = paths.checkpoint_dir(RUN_DIR, arm, old)
+        for weights in ckpt.glob("*.safetensors"):
+            weights.unlink()
+            log(f"pruned {weights}")
+
+
+# --- kl50: kl_high / kl_mid / kl_low vs random at cap 8192, 51 steps --------
+# (USER 2026-08-31 late: "total student rollouts being 12 (4 each for kl high
+# to low) and random as well ... 50 steps (so expand the sampling of the
+# prompts)". 136 prompts x 4 selected = 544 rows = 17 steps/round at eff
+# batch 32 -> 51 total; 128 prompts gave only 48. Micro-batch probe 8 then 4;
+# vLLM at 0.95 (USER asked 0.99 "if safe": 0.99 leaves <1 GiB for the CUDA
+# context + cudagraphs on an 80 GiB card, so 0.95 is the max-safe setting).)
+
+KL50_DIR = ROOT / "outputs/runs/kl50"
+KL50W_DIR = ROOT / "outputs/runs/kl50w"
+KL50_TEACHER = ROOT / "outputs/runs/kl50_teacher"
+ORACLE8K = ROOT / "outputs/runs/oracle8k"
+KL50_PROMPTS = 136
+# kl50w (USER 2026-09-01: "restart the run with warmup again - with the
+# optimizer state stores as well ... and also we need to hyper parameter
+# tune for lr (with cosine decay or something)"): same arms/data/steps as
+# kl50, but per-round warmup+cosine LR cycles, Adam state persisted across
+# rounds (name-mapped, see train.py), and the peak LR picked by a probe.
+WARMUP_OPT = False   # set by --kl50w
+BANK_SRC = ORACLE8K  # kl50 banks from oracle8k; kl50w banks from kl50
+
+
+def _rebucket_pool_rounds() -> None:
+    """Re-bucket the existing prompt pool at KL50_PROMPTS per round.
+
+    The pool rows (a fixed seed-42 sample, 1024 prompts) keep their order and
+    example_index; only the `round` field is reassigned as i // 136. The
+    banked oracle8k round 0 covered examples 0..127, which stay in round 0;
+    examples 128..135 (previously round 1) join round 0 and are generated on
+    resume. Rounds 1-2 draw entirely from prompts no kl50 stage has touched.
+    Re-sampling the pool at a larger n instead would invalidate the bank:
+    load_examples is not prefix-stable across n.
+    """
+    pool_path = RUN_DIR / "pool" / "prompts.jsonl"
+    rows = read_jsonl(pool_path)
+    changed = False
+    for i, row in enumerate(rows):
+        assert row["example_index"] == i, f"pool row {i} has index {row['example_index']}"
+        if row["round"] != i // KL50_PROMPTS:
+            row["round"] = i // KL50_PROMPTS
+            changed = True
+    if not changed:
+        return
+    tmp = pool_path.with_suffix(".jsonl.tmp")
+    with tmp.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    os.replace(tmp, pool_path)
+    log(f"pool re-bucketed: {len(rows)} prompts at {KL50_PROMPTS}/round")
+
+
+def _bank_round0(src_run: Path) -> None:
+    """The source run's shared round-0 block is valid here verbatim: same
+    base model, pool, seed 42 and cap-8192 config (all written by
+    _write_config), with its eval/rollouts/oracle scoring complete.
+    Selections are NOT copied -- write_selection redoes them.
+
+    The done.shard markers are DROPPED from the copy so run_rollout_eval
+    still launches the stage and row-level resume decides what is pending
+    (kl50 banking oracle8k's 128-prompt round 0 needed a 136-prompt top-up;
+    copied markers made the driver skip the stage entirely, which is exactly
+    the bug that stalled the first relaunch). The bank itself is guarded by
+    its own marker file, written last, so a re-launch never re-copies over
+    post-bank work (top-up rows, oracle re-scoring)."""
+    src = arm_round(src_run, BUCKETS[0], 0)
+    dst = arm_round(RUN_DIR, BUCKETS[0], 0)
+    markers = (dst / "banked_round0.json", dst / "banked_from_oracle8k.json")
+    if any(m.exists() for m in markers):
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for sub in ("eval", "rollouts", "oracle"):
+        if (dst / sub).exists():
+            shutil.rmtree(dst / sub)
+        shutil.copytree(src / sub, dst / sub)
+    for done in [*(dst / "eval").glob("done.shard*"), *(dst / "rollouts").glob("done.shard*")]:
+        done.unlink()
+    markers[0].write_text(json.dumps({"src": str(src)}) + "\n")
+    log(f"round-0 banked from {src_run.name} (eval + rollouts + oracle scoring)")
+
+
+def drive_kl50() -> None:
+    _write_config(RUN_DIR, student_id="Qwen/Qwen3.5-2B", num_rollouts=NUM_ROLLOUTS,
+                  cap=CAP, num_prompts=KL50_PROMPTS, gpu_mem=0.95)
+    _write_config(KL50_TEACHER, student_id="Qwen/Qwen3.5-9B",
+                  num_rollouts=TEACHER_ROLLOUTS, cap=CAP, gpu_mem=0.95)
+    if WARMUP_OPT:
+        # Per-round LR cycle: 1-step warmup (USER 2026-09-01: "5% warmup
+        # ratio is fair" -- 1/17 = 5.9%; the Adam-reset transient the longer
+        # warmup absorbed is gone once persist_optimizer carries the moments)
+        # then cosine to 10% of peak over the round's 17 steps.
+        # persist_optimizer makes each round a continuation of the last
+        # (train.py name-maps the saved Adam state onto the new param order).
+        cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
+        cfg.train.warmup_steps = 1
+        cfg.train.lr_scheduler_type = "cosine_with_min_lr"
+        cfg.train.lr_scheduler_kwargs = {"min_lr_rate": 0.1}
+        cfg.train.persist_optimizer = True
+        OmegaConf.save(config=cfg, f=RUN_DIR / "resolved_config.yaml", resolve=True)
+        log("kl50w: warmup 2 + cosine_with_min_lr(min_lr_rate=0.1) per round, "
+            "Adam state persisted across rounds")
+    # Warmup history: a warmup_steps=2 + constant_with_warmup patch ran here
+    # for the round-2 trains only (it did kill the Adam-reset restart spike:
+    # kl_high r2 opened 0.066/0.065 vs r1's 0.067->0.175, grad_norm 0.53 vs
+    # 6.12), but USER 2026-09-01 ~11:25 UTC ordered round 2 RETRAINED without
+    # it so all rounds share one optimizer regime ("kill the runs and train
+    # out the warmup"). The warmup-trained round_02 checkpoints/train dirs
+    # and round_03 evals are preserved in outputs/runs/kl50_warmup_backup/.
+    _rebucket_pool_rounds()
+    # Teacher ceiling at THIS cap (500x4, same protocol) -- eval only, no
+    # teacher rollouts and no teacher-pool rescoring (those were diagnostics).
+    run_rollout_eval(KL50_TEACHER, "all", 0, eval_only=True)
+
+    _bank_round0(BANK_SRC)
+    run_rollout_eval(RUN_DIR, ARMS[0], 0, eval_only=False)  # no-op when banked
+    for arm in ARMS[1:]:
+        _copy_shared_round0(ARMS[0], arm)
+    r0_oracle = arm_round(RUN_DIR, BUCKETS[0], 0) / "oracle"
+    run_score(
+        arm_round(RUN_DIR, BUCKETS[0], 0) / "rollouts" / "tokens",
+        r0_oracle, checkpoint_path(BUCKETS[0], 0),
+        expected=KL50_PROMPTS * NUM_ROLLOUTS,
+    )
+    for arm in ARMS:
+        write_selection(arm, 0, r0_oracle)
+
+    # Probe micro 8 first (USER: "i think it can accomodate 8 easily now");
+    # micro 4 is the measured-safe 8192 fallback (59.2 GiB peak, apod run).
+    # kl50w inherits kl50's verdict (identical model/cap/data): copy the
+    # marker so run_micro_probe just re-applies instead of re-probing.
+    if RUN_DIR != KL50_DIR and not (RUN_DIR / "micro_probe.json").exists():
+        shutil.copy(KL50_DIR / "micro_probe.json", RUN_DIR / "micro_probe.json")
+    run_micro_probe(candidates=(8, 4), fallback=4)
+    if WARMUP_OPT:
+        run_lr_probe()
+
+    for rnd in range(TRAIN_ROUNDS):
+        for arm in ARMS:
+            run_train(arm, rnd)
+            prune_checkpoints(arm, rnd)
+            if WARMUP_OPT and rnd >= 1:
+                # The previous round's Adam state was consumed by this train;
+                # drop it (bf16 moments ~8 GB per arm) so steady state keeps
+                # exactly one optimizer_state.pt per arm on disk.
+                stale = paths.checkpoint_dir(RUN_DIR, arm, rnd - 1) / "optimizer_state.pt"
+                if stale.exists():
+                    stale.unlink()
+                    log(f"pruned {stale}")
+        for arm in ARMS:
+            terminal = rnd + 1 == TRAIN_ROUNDS
+            run_rollout_eval(RUN_DIR, arm, rnd + 1, eval_only=terminal)
+            if not terminal:
+                oracle_dir = None
+                if arm in BUCKETS:  # random stays unscored after round 0
+                    oracle_dir = arm_round(RUN_DIR, arm, rnd + 1) / "oracle"
+                    run_score(
+                        arm_round(RUN_DIR, arm, rnd + 1) / "rollouts" / "tokens",
+                        oracle_dir, checkpoint_path(arm, rnd + 1),
+                        expected=KL50_PROMPTS * NUM_ROLLOUTS,
+                    )
+                write_selection(arm, rnd + 1, oracle_dir)
+    log("kl50 drive complete")
+
+
 def report() -> None:
     subprocess.run(
         [sys.executable, "scripts/eval_table.py", "--run-dir", str(RUN_DIR)],
@@ -487,7 +789,7 @@ def report() -> None:
 
 
 def main() -> None:
-    global REPLICATE, RUN_DIR, TRAIN_ROUNDS, ARMS, SEED_OVERRIDE, CAP
+    global REPLICATE, RUN_DIR, TRAIN_ROUNDS, ARMS, SEED_OVERRIDE, CAP, WARMUP_OPT, BANK_SRC
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--build", action="store_true")
@@ -501,6 +803,16 @@ def main() -> None:
     group.add_argument("--at4096", action="store_true",
                        help="third cap point: 4 bucket arms at cap 4096, "
                             "1 round + terminal (USER 2026-08-18)")
+    group.add_argument("--kl50", action="store_true",
+                       help="kl_high/kl_mid/kl_low vs random at cap 8192, "
+                            "3 rounds x 17 steps = 51 at eff batch 32, 136 "
+                            "prompts/round, teacher ceiling eval at 8192, "
+                            "micro probed 8 then 4 (USER 2026-08-31)")
+    group.add_argument("--kl50w", action="store_true",
+                       help="kl50 rerun with per-round warmup+cosine LR "
+                            "cycles, Adam state persisted across rounds, and "
+                            "a probed peak LR; banks round 0 from kl50 "
+                            "(USER 2026-09-01)")
     parser.add_argument("--lr", type=float, default=None,
                         help="override train LR for this (re)launch, e.g. 5e-6 "
                              "for the round-3 extension per the probe verdict")
@@ -508,7 +820,16 @@ def main() -> None:
     if args.lr is not None:
         global LR_OVERRIDE
         LR_OVERRIDE = args.lr
-    if args.replicate:
+    if args.kl50 or args.kl50w:
+        RUN_DIR = KL50W_DIR if args.kl50w else KL50_DIR
+        CAP = 8192
+        TRAIN_ROUNDS = 3
+        ARMS = ("kl_high", "kl_mid", "kl_low", "random")
+        if args.kl50w:
+            WARMUP_OPT = True
+            BANK_SRC = KL50_DIR
+        drive_kl50()
+    elif args.replicate:
         REPLICATE = True
         RUN_DIR = ROOT / "outputs/runs/oracle16k_seed2"
         SEED_OVERRIDE = 1042

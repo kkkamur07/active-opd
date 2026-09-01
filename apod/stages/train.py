@@ -93,9 +93,42 @@ def build_rows(
                 ids = ids[:max_length]
                 tail_truncated += 1
             mask = [0] * prompt_length + [1] * (len(ids) - prompt_length)
-            rows.append({"input_ids": ids, "completion_mask": mask, "prompt": ""})
+            # "length" feeds group_by_length: the collator pads to the batch
+            # max, and random batching wastes a measured 9% of tokens on pads.
+            rows.append(
+                {"input_ids": ids, "completion_mask": mask, "prompt": "", "length": len(ids)}
+            )
             completion_tokens += len(ids) - prompt_length
     return rows, completion_tokens, tail_truncated
+
+
+def _optimizer_param_names(optimizer, model) -> list[str]:
+    """Optimizer param order -> parameter names (any DDP ``module.`` stripped).
+
+    AdamW's ``state_dict`` keys states by POSITION over the concatenated
+    param_groups, so a raw dump is only loadable if the groups are rebuilt in
+    the exact same order. Name-keying the dump makes the cross-round mapping
+    explicit and robust (USER 2026-09-01: "with proper key mapping so that
+    run can be restarted at any point")."""
+    id_to_name = {id(p): n.removeprefix("module.") for n, p in model.named_parameters()}
+    return [id_to_name[id(p)] for group in optimizer.param_groups for p in group["params"]]
+
+
+def _restore_optimizer_state(optimizer, model, saved: dict) -> int:
+    """Load a ``{"names", "state_dict"}`` dump into ``optimizer``, remapping
+    positional state keys through param names so the current param order need
+    not match the one at save time. Current ``param_groups`` (lr etc.) are
+    kept: those are scheduler-driven, not carried over. Returns the number of
+    restored per-param states."""
+    index_of = {n: i for i, n in enumerate(_optimizer_param_names(optimizer, model))}
+    remapped = {
+        index_of[saved["names"][int(key)]]: value
+        for key, value in saved["state_dict"]["state"].items()
+    }
+    current = optimizer.state_dict()
+    current["state"] = remapped
+    optimizer.load_state_dict(current)
+    return len(remapped)
 
 
 def main() -> None:
@@ -131,6 +164,13 @@ def main() -> None:
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from trl.experimental.gkd import GKDConfig, GKDTrainer
+    from trl.experimental.gkd import gkd_trainer as _gkd_module
+
+    # TRL flushes the CUDA allocator cache on EVERY compute_loss (128x per
+    # rank per round), forcing ~20 GiB of transients to be re-faulted each
+    # micro-step. With >20 GiB of measured headroom the flush protects
+    # nothing; no-op it (module-level name, looked up at call time).
+    _gkd_module.empty_cache = lambda: None
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
@@ -185,9 +225,21 @@ def main() -> None:
         max_length=int(tc.max_length),
         logging_steps=int(tc.logging_steps),
         save_strategy=str(tc.save_strategy),
+        # e.g. {"min_lr_rate": 0.1} for cosine_with_min_lr; absent -> {}.
+        lr_scheduler_kwargs=dict(tc.get("lr_scheduler_kwargs") or {}),
         seed=int(tc.seed),
         teacher_model_init_kwargs={"dtype": str(tc.teacher_dtype)},
         report_to=[],
+        # Perf-only (identical objective): batch similar-length sequences so
+        # the pad-to-batch-max collator wastes ~0.1% instead of a measured 9%
+        # of tokens, and prefetch collated batches off the training loop.
+        # transformers 5.x spelling: group_by_length=True became
+        # train_sampling_strategy="group_by_length" (the old kwarg is gone
+        # from TRL 1.10's config chain and raises TypeError).
+        train_sampling_strategy="group_by_length",
+        length_column_name="length",
+        dataloader_num_workers=2,
+        dataloader_prefetch_factor=4,
     )
 
     start = time.perf_counter()
@@ -231,6 +283,32 @@ def main() -> None:
     trainer.teacher_model.eval()
     for p in trainer.teacher_model.parameters():
         p.requires_grad_(False)
+
+    # Optimizer continuity across rounds (train.persist_optimizer): restore
+    # the previous round's Adam moments + per-param step counts so a round
+    # restart is a continuation, not a magnitude-blind t=1 sign step. Weights
+    # already come from the same checkpoint, so state and params agree. The
+    # scheduler stays round-local (fresh warmup+decay cycle per round).
+    persist_optimizer = bool(tc.get("persist_optimizer") or False)
+    if persist_optimizer and args.round_index > 0:
+        prev = (
+            round_dir(run_dir, args.arm, args.round_index - 1)
+            / "checkpoint" / "optimizer_state.pt"
+        )
+        if not prev.exists():
+            # Same philosophy as resolve_model_path: silently training with
+            # reset moments would be a different experiment, not a failed one.
+            raise FileNotFoundError(
+                f"train.persist_optimizer is set but {prev} is missing; the "
+                "previous round's train stage predates the setting or its "
+                "state was pruned"
+            )
+        saved = torch.load(prev, map_location="cpu", weights_only=True)
+        trainer.create_optimizer()  # idempotent; train() reuses it
+        inner = getattr(trainer.optimizer, "optimizer", trainer.optimizer)
+        restored = _restore_optimizer_state(inner, trainer.model, saved)
+        logger.info("optimizer state restored from {} ({} params)", prev, restored)
+
     trainer.train()
     wall_clock = time.perf_counter() - start
 
@@ -245,6 +323,18 @@ def main() -> None:
     unwrapped.config.use_cache = True
     unwrapped.save_pretrained(checkpoint_dir)
     tokenizer.save_pretrained(checkpoint_dir)
+    if persist_optimizer and trainer.optimizer is not None:
+        # ~8 GB at 2B params (moments are bf16, matching the param dtype);
+        # the driver deletes the previous round's file once consumed.
+        inner = getattr(trainer.optimizer, "optimizer", trainer.optimizer)
+        torch.save(
+            {
+                "names": _optimizer_param_names(inner, unwrapped),
+                "state_dict": inner.state_dict(),
+            },
+            checkpoint_dir / "optimizer_state.pt",
+        )
+        logger.info("optimizer state saved to {}", checkpoint_dir / "optimizer_state.pt")
 
     log_history = list(trainer.state.log_history)
     write_jsonl(train_dir / "log_history.jsonl", log_history)
