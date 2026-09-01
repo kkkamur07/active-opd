@@ -673,6 +673,9 @@ def main(argv: list[str] | None = None) -> int:
             gpu_memory_utilization=float(cfg.engine.gpu_memory_utilization),
             seed=int(cfg.seed),
             fast_presence_penalty=bool(cfg.sampling.fast_presence_penalty),
+            # vLLM's A100 default is 256; the scheduler must admit as many
+            # sequences as the chunking targets or a larger target is a no-op.
+            max_num_seqs=int(cfg.engine.target_concurrent_sequences),
         )
         tokenizer = llm.get_tokenizer()
 

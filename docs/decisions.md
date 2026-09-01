@@ -23,12 +23,22 @@ lives in the linked ADR or doc; vocabulary in CONTEXT.md.
 - **Cap 8192 everywhere** (labels, training, eval); cap-hit is wrong (strict).
 - **Eval every 10 training steps ("refresh")**: MATH-500 avg@4 + pass@4 on all
   500, AIME 2025+2026 avg@16 + pass@16 on all 60, both at 8192, strict. ADR 0006.
-- **Per-step logging on the training batch**: loss, top-16 overlap ratio,
-  overlap-token advantage, mean |H_S - H_T| per token.
+- **Per-step logging on the training batch, all in TensorBoard**: loss, grad_norm,
+  learning rate (already exported per step by scripts/tb_export.py), plus new:
+  top-16 overlap ratio, overlap-token advantage, mean |H_S - H_T| per token,
+  tokens in the step, cap-hit fraction of the batch. Evals only every 10 steps.
+  Purpose: see training instabilities (kl50's per-refresh restart spikes came from
+  Adam state resetting; fixed by persist_optimizer in kl50w).
+- **r3 uses student entropy** (uncertainty sampling queries the learner; teacher
+  entropy would measure label reliability, which r1's teacher label already probes).
 - **Vocabulary**: "training step" (not round), "question" (not prompt), "refresh"
   for the every-10-steps eval + re-rollout.
 - **Question bank**: student sweep ~14,500 questions, teacher only where its label
   decides a bucket; stored with grades, truncation, lengths; reusable.
+- **kl50 headline is at 34 training steps** (eval after two refreshes; the post-51-step
+  eval never ran). kl_mid's strict gain came with the largest cap-hit drop
+  (0.777 -> 0.566): strict gains partly measure learning to finish; every results
+  table shows cap-hit next to avg@4.
 - **Entropy vs KL offline**: student entropy ranks a question's 12 rollouts like the
   exact reverse KL at Spearman 0.73 (docs/analysis_entropy_vs_kl.md); length does
   not. Motivates the entropy_top4 arm without a teacher forward.
@@ -45,3 +55,9 @@ lives in the linked ADR or doc; vocabulary in CONTEXT.md.
   behind a flag with offline validation, not used for selection yet.
 - **TensorRT-LLM: no.** Generation is under a third of wall-clock; scoring and
   eval are the levers.
+- 2026-09-01: **Peak LR 3.1623e-06 for kl50w and r1/r2/r3** (USER: "use the best lr from the probe"). Source: `outputs/runs/kl50w/lr_probe.json` `chosen_lr`, refined grid over [1e-6, 1e-5] on kl_mid at 20:20 UTC (near-ties within 2% go to the lower LR). Same warmup(1) + cosine_with_min_lr(0.1) per refresh, optimizer state persisted. The 2e-5 in `conf/train/gkd.yaml` stays as the untouched default; the experiment configs override it.
+- 2026-09-01: **Fused GDN kernels stay on for every run from here** (USER: "we need to use the kernels to get the speedup"). flash-linear-attention 0.5.2 is installed in `.venv`, the environment every launcher and the peer's chain use; `.venv-kernels` was only the benchmark sandbox and carries nothing extra. Runs that started before the install (kl50) are not numerically comparable at bf16 level to runs after it; kl50w banks nothing trained from kl50: only the base student's pass-0 rollouts, eval and exact-KL scores (generation outputs); every kl50w train pass starts from the base student with the kernels on.
+- 2026-09-01: **One LR schedule per run, continued across refreshes** (USER: "the lr schedule ... has to continue"). Warmup 5 steps = 5% of the 100 training steps, once at the start; then cosine_with_min_lr(0.1) to step 100. Each train pass builds the scheduler for the full run and advances it to the global step offset; Adam state persists as before. Replaces the kl50w per-round LR cycles. Verified need: tests/test_persist_optimizer.py showed the per-pass rebuild restarts the LR at [0, peak] every pass.
+- 2026-09-01: **Per-step bf16 rounding diagnostic** (USER: "do the diagnosis"): fraction of parameter elements whose Adam update is below half a bf16 ulp and rounds away; logged as train/bf16_rounded_frac with grad_norm and lr. Student trains in pure bf16, no fp32 master weights.
+- 2026-09-01: **kl50w cancelled before its first train pass** (USER: "we don't need this again, kill this"). Its LR verdict (peak 3.1623e-06) is kept. Order from here: batch-size preliminary with the fused kernels (largest micro-batch at cap 8192, effective batch 32), then `bank-8k`, then `r1-correctness-8k`.
+- 2026-09-01: `.venv` stays the single environment (it has flash-linear-attention 0.5.2); the duplicate `.venv-kernels` benchmark sandbox was deleted.
