@@ -10,9 +10,12 @@ included) and leave byte-identical eval rows, trajectory rows, npz arrays
 and markers behind. Scenarios: full round, ``--eval-only``, ``--eval-only
 --eval-dataset`` on a stamped set with ``--eval-num-problems``, resume after
 a finished eval (rollouts only, no eval regeneration), resume mid-rollouts,
-and two shards. The merge itself is checked too: fewer generate calls, a
-chunk holding both kinds, and the eval marker written only once every eval
-request is graded.
+two shards, and several eval sets in one session (``--eval-dataset math500
+tiny``: the same requests and files as the old stage's default run plus its
+``--eval-only --eval-dataset tiny`` run). The merge itself is checked too:
+fewer generate calls, a chunk holding both kinds, the eval marker written
+only once every eval request is graded, and max_num_seqs handed to the
+engine only above vLLM's default of 256.
 
 Needs vLLM importable (CPU is fine) for the real SamplingParams; runs under
 pytest or as ``python -m tests.test_rollout_eval_merged``.
@@ -180,9 +183,11 @@ class Harness:
         self.label = label
         self.run_dir = make_run_dir(root / label)
         self.calls: list = []
+        self.engine_kwargs: dict = {}
         stage_module.build_llm = self.build_llm
 
     def build_llm(self, model_path, **kwargs):
+        self.engine_kwargs = dict(kwargs)
         round_dir = self.run_dir / "arms" / "a" / "rounds" / "round_00"
         return FakeLLM(self.calls, {
             "eval": round_dir / "eval" / "done.shard0",
@@ -307,6 +312,30 @@ def run_all(root: Path) -> None:
         assert (new.round_dir() / "eval" / f"done.shard{shard}").exists()
         assert (new.round_dir() / "rollouts" / f"done.shard{shard}").exists()
     assert len(list((new.round_dir() / "rollouts" / "tokens").glob("*.npz"))) == 5
+
+    # 7. several eval sets in ONE session (the step-based driver's refresh):
+    # the old stage needed a default run plus an --eval-only run per set.
+    for h in (old, new):
+        shutil.rmtree(h.round_dir())
+    old_calls = old.run() + old.run("--eval-only", "--eval-dataset", "tiny")
+    new_calls = new.run("--eval-dataset", "math500", "tiny")
+    assert sorted(flat_requests(old_calls)) == sorted(flat_requests(new_calls))
+    assert_same_artifacts(old.round_dir(), new.round_dir())
+    first_rollout = next(i for i, r in enumerate(flat_requests(new_calls)) if not is_eval(r))
+    assert all(is_eval(r) for r in flat_requests(new_calls)[:first_rollout])
+    evals = [r for r in flat_requests(new_calls) if is_eval(r)]  # sets in the order given: 7 math500, 3 tiny
+    assert len(evals) == 10 and all(r[1][6] < 200000 for r in evals[:7]) and all(r[1][6] >= 200000 for r in evals[7:])
+    for sub in ("eval", "eval_tiny", "rollouts"):
+        assert (new.round_dir() / sub / "done.shard0").exists(), sub
+    assert "max_num_seqs" not in new.engine_kwargs  # target 8 <= vLLM's default 256
+
+    # 8. a concurrency target above 256 moves the engine's admission ceiling
+    cfg = OmegaConf.load(new.run_dir / "resolved_config.yaml")
+    cfg.engine.target_concurrent_sequences = 512
+    OmegaConf.save(config=cfg, f=new.run_dir / "resolved_config.yaml")
+    shutil.rmtree(new.round_dir())
+    new.run("--eval-only")
+    assert new.engine_kwargs["max_num_seqs"] == 512
 
 
 def test_merged_stream_matches_separate_streams():

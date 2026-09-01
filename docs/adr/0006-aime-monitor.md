@@ -29,9 +29,11 @@ Two trade-offs had to be made:
 ## Decision
 
 - Pooled AIME 2025+2026 (`aime2526`, 60 questions, ids keep the year prefix)
-  at avg@16 / pass@16, evaluated by the same stage as MATH-500
-  (`rollout_eval --eval-only --eval-dataset aime2526` into `eval_aime2526/`)
-  at every refresh, at the run cap, same sampling as rollouts, strict
+  at avg@16 / pass@16, evaluated in the same `rollout_eval` engine session
+  as MATH-500 and the refresh's rollouts (`--eval-dataset math500 aime2526`;
+  its own `eval_aime2526/` files and done-markers, never a second launch:
+  design review D1, ~16 min saved per arm) at every refresh, at the run cap,
+  same sampling as rollouts, strict
   scoring (no `\boxed` = incorrect, cap-hit included), Math-Verify grading
   (handles `\boxed{070}` vs `70`; no extra normalisation).
 - Per-question seeds follow the MATH-500 rule
@@ -55,6 +57,6 @@ Two trade-offs had to be made:
   comparisons. A single-seed 5-point AIME delta between arms is noise
   (`docs/eval_benchmarks.md` section 6).
 - The driver has to materialize `pool/eval_problems_aime2526.jsonl` once per
-  run and launch the second eval per refresh; the stage refuses to load the
-  set from the Hub itself so problem_index -> question can never drift
-  between refreshes.
+  run and name the set on every `rollout_eval` launch; the stage refuses to
+  load the set from the Hub itself so problem_index -> question can never
+  drift between refreshes.
