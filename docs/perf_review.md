@@ -226,3 +226,30 @@ Per-stage utilisation, derived from the measurements:
    eval in the bucket driver (finding 3).
 4. Opportunistic, no numerics impact: grading futures + merged generate
    (finding 5).
+
+## Probes 2026-09-01 (fused GDN kernels on, .venv fla 0.5.2)
+
+Batch probe (kl50 pass-0 kl_high selection, 544 rows, cap 8192, 17 steps,
+2 DDP ranks, diagnostics on; scratchpad bench/batch_probe.py):
+
+| micro x accum | peak MiB | s/step |
+|---|---|---|
+| 16 x 1 | 73,949 | 42.6 |
+| 8 x 2 | 56,885 | 44.5 |
+
+Adopted 16 x 1 (largest micro under 75,000 MiB), conf/train/gkd.yaml and
+conf/experiment/refresh_8k.yaml; 8 x 2 is the fallback if a real run OOMs.
+Pre-kernels reference: micro 4 ~99 s/step, micro 8 71.5 GiB peak.
+
+Concurrency probe (eval-only MATH-500, one engine per GPU, 256 vs 512
+target_concurrent_sequences = max_num_seqs; scratchpad bench/conc_probe.py):
+
+| model | conc | requests | wall s | req/min | preempt |
+|---|---|---|---|---|---|
+| 2B | 256 | 1024 | 856 | 71.8 | 0 |
+| 2B | 512 | 1024 | 856 | 71.8 | 0 |
+| 9B | 256 | 512 | 884 | 34.7 | 0 |
+| 9B | 512 | 512 | 1205 | 25.5 | 0 |
+
+512 gives nothing for the 2B and slows the 9B; conf/engine/default.yaml stays
+at 256.

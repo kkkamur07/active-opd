@@ -20,8 +20,8 @@ eval:
 
 train:
   max_length: 16384
-  per_device_train_batch_size: 8  # 2 ranks x 8 x 2 = effective batch 32
-  gradient_accumulation_steps: 2  # (kl50 micro probe at cap 8192: 71.5 GiB)
+  per_device_train_batch_size: 16 # 2 ranks x 16 x 1 = effective batch 32
+  gradient_accumulation_steps: 1  # (batch probe 2026-09-01 with kernels: 73,949 MiB peak; micro 8 = 56,885 MiB fallback)
   # Peak LR = the kl50w probe verdict (outputs/runs/kl50w/lr_probe.json
   # "chosen_lr", refined by lr_refine.json; USER 2026-09-01). conf/train/
   # gkd.yaml keeps 2e-5 for the live kl50w chain.

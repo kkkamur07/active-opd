@@ -27,8 +27,8 @@ total_training_steps: null   # int: ONE LR schedule over the whole run --
                          # launch fails if offset + pass steps > total. null:
                          # the schedule restarts every launch (old behaviour)
 num_train_epochs: 1
-per_device_train_batch_size: 8   # PER RANK; kl50/kl50w value (micro probe 2026-08-31 at cap 8192: 71.5 GiB peak). At cap 16384 only 2 fits (apod run: micro-4 59.2 GiB at 8192, superlinear); scripts/bucket_experiment.py sets 2 x 8 there.
-gradient_accumulation_steps: 2   # 2 DDP ranks x 8 x 2 = effective batch 32 (kl50/kl50w, 2026-08-31/09-01). USER DECISION 2026-08-15: eff 32, raised from 16 for stability (smoke3 at 4 oscillated, smoke8k at 16 degraded gently). Top-4 arms: 512/32 = 16 steps/round; 136 prompts: 17.
+per_device_train_batch_size: 16  # PER RANK; batch probe 2026-09-01 21:00 UTC with the fused GDN kernels at cap 8192 (kl50 pass-0 rows, diagnostics on): micro 16 peak 73,949 MiB, 42.6 s/step; micro 8 peak 56,885 MiB, 44.5 s/step -> largest micro under the 75,000 MiB rule. Pre-kernels kl50 value was 8 (71.5 GiB peak, ~99 s/step at micro 4). At cap 16384 only 2 fits (apod run: micro-4 59.2 GiB at 8192, superlinear); scripts/bucket_experiment.py sets 2 x 8 there.
+gradient_accumulation_steps: 1   # 2 DDP ranks x 16 x 1 = effective batch 32 (2026-09-01; was 2 ranks x 8 x 2). USER DECISION 2026-08-15: eff 32, raised from 16 for stability (smoke3 at 4 oscillated, smoke8k at 16 degraded gently). Top-4 arms: 512/32 = 16 steps/round; 136 prompts: 17.
 effective_batch: 32              # ASSERTED by the train stage: world_size x
                                  # per_device x grad_accum must equal this, so
                                  # changing num_gpus without retuning accum
