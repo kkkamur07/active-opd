@@ -110,8 +110,10 @@ Stages are plain scripts (NOT Hydra apps — only the driver is); they load
 
 ```
 python -m apod.stages.rollout_eval --run-dir D --arm A --round R --shard K --num-shards N [--eval-only] [--eval-num-problems M] [--eval-dataset NAME]
-    one vLLM engine session: MATH-500 eval first, then rollouts (skipped
-    with --eval-only for the final round); prints per-stage throughput.
+    one vLLM engine session and ONE generate stream: MATH-500 eval requests
+    first, then rollouts (skipped with --eval-only for the final round),
+    packed into target_concurrent_sequences-sized chunks that may hold
+    both; separate files and done-markers per kind; prints throughput.
     --eval-dataset NAME (a conf/eval/NAME.yaml key other than cfg.eval.dataset,
     e.g. aime2526) evaluates pool/eval_problems_NAME.jsonl under NAME's own
     protocol (num_problems, num_samples, seed offset; cfg.eval_sets.NAME in
