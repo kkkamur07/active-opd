@@ -7,7 +7,7 @@
 #   id       = deterministic from (run dir name, arm), so the driver's refresh
 #              evals and every train-stage launch resume the SAME run
 # x-axis of every scalar is global_step (training steps across refreshes).
-mode: offline        # online | offline | disabled. Offline never blocks on
+mode: online   # logged in 2026-09-01 (krrish-agar); offline + `wandb sync` is the fallback
                      # the network; upload later with
                      #   wandb sync <run_dir>/wandb/offline-run-*
                      # (all offline-run dirs of an arm share its run id).
