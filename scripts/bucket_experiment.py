@@ -62,7 +62,7 @@ from omegaconf import OmegaConf
 from apod import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE_RUN = ROOT / "outputs/runs/apod"
+SOURCE_RUN = ROOT / "outputs/runs/apod"  # prompt pool + MATH-500 eval set only
 RUN_DIR = ROOT / "outputs/runs/oracle16k"
 TEACHER_RUN = ROOT / "outputs/runs/oracle16k_teacher"
 BUCKETS = ("kl_high", "kl_mid", "kl_low")
@@ -115,11 +115,39 @@ LR_OVERRIDE: float | None = None  # --lr: round-3 extension runs at the LR the
                                   # ordering" -- LR conditional on probe)
 
 
+def _compose_config():
+    """conf/ composed the way ``apod.main``'s Hydra app sees it (defaults
+    list + interpolations), before any per-run override below."""
+    from hydra import compose, initialize_config_dir
+
+    with initialize_config_dir(config_dir=str(ROOT / "conf")):
+        return compose(config_name="config")
+
+
 def _write_config(dst: Path, *, student_id: str, num_rollouts: int,
                   seed: int | None = None, cap: int = 16384,
                   num_prompts: int | None = None,
                   gpu_mem: float | None = None) -> None:
-    cfg = OmegaConf.load(SOURCE_RUN / "resolved_config.yaml")
+    """Fresh run dir: compose conf/ and stamp this run's overrides.
+
+    An existing run dir keeps the resolved_config.yaml it started with:
+    every stage and every resume reads THAT file, and conf/ may have moved
+    on since (engine.target_concurrent_sequences is a between-runs setting,
+    like a sampling knob). ``--lr`` is the one deliberate relaunch override.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    if not (dst / "pool").exists():
+        shutil.copytree(SOURCE_RUN / "pool", dst / "pool")
+    path = dst / "resolved_config.yaml"
+    if path.exists():
+        if LR_OVERRIDE is not None:
+            cfg = OmegaConf.load(path)
+            cfg.train.learning_rate = LR_OVERRIDE
+            OmegaConf.save(config=cfg, f=path, resolve=True)
+        return
+    cfg = _compose_config()
+    cfg.run_name = dst.name
+    cfg.output_dir = str(dst)  # absolute, as apod.main stamps it
     cfg.model.student_id = student_id
     cfg.rollout.num_rollouts = num_rollouts
     if num_prompts is not None:
@@ -127,8 +155,10 @@ def _write_config(dst: Path, *, student_id: str, num_rollouts: int,
     if gpu_mem is not None:
         cfg.engine.gpu_memory_utilization = gpu_mem
     if seed is not None:
+        # The pool is COPIED from SOURCE_RUN, so its seed stays the composed
+        # default; only the sampling seed and train.seed (${seed}) move.
+        cfg.data.pool_seed = int(cfg.data.pool_seed)
         cfg.seed = seed
-        cfg.train.seed = seed  # resolved_config stores ${seed} resolved
     if LR_OVERRIDE is not None:
         cfg.train.learning_rate = LR_OVERRIDE
     cfg.sampling.max_new_tokens = cap
@@ -146,10 +176,7 @@ def _write_config(dst: Path, *, student_id: str, num_rollouts: int,
         cfg.train.max_length = 24576
         cfg.train.per_device_train_batch_size = 2
         cfg.train.gradient_accumulation_steps = 8
-    dst.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(config=cfg, f=dst / "resolved_config.yaml", resolve=True)
-    if not (dst / "pool").exists():
-        shutil.copytree(SOURCE_RUN / "pool", dst / "pool")
+    OmegaConf.save(config=cfg, f=path, resolve=True)
 
 
 def build() -> None:
@@ -432,9 +459,9 @@ def _apply_micro(chosen: int) -> None:
 def run_micro_probe(candidates: tuple[int, ...] = (4, 2), fallback: int = 2) -> None:
     marker = RUN_DIR / "micro_probe.json"
     if marker.exists():
-        # Re-apply on resume: _write_config rewrites resolved_config from the
-        # source defaults on every (re)launch, which would silently revert the
-        # probe's verdict otherwise.
+        # Re-apply on resume (a no-op now that _write_config leaves an
+        # existing run's config alone; kept so a hand-edited config cannot
+        # silently drop the probe's verdict).
         chosen = json.loads(marker.read_text())["chosen_micro"]
         _apply_micro(chosen)
         log(f"micro-probe already decided: micro {chosen} (re-applied)")
@@ -525,8 +552,7 @@ def run_lr_probe(candidates: tuple[float, ...] = (2e-5, 1e-5, 5e-6),
                  fallback: float = 2e-5) -> None:
     marker = RUN_DIR / "lr_probe.json"
     if marker.exists():
-        # Re-apply on resume, same reason as run_micro_probe: _write_config
-        # rewrites resolved_config from defaults on every (re)launch.
+        # Re-apply on resume, same reason as run_micro_probe.
         chosen = json.loads(marker.read_text())["chosen_lr"]
         _apply_lr(chosen)
         log(f"lr-probe already decided: lr {chosen:g} (re-applied)")

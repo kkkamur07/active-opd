@@ -17,22 +17,8 @@ learning_rate: 2.0e-5    # full-finetune scale (tinker's 1e-4 is LoRA-scale)
 lr_scheduler_type: constant
 warmup_steps: 0
 num_train_epochs: 1
-per_device_train_batch_size: 2   # PER RANK. Micro-batch history (all at eff
-                                 # 32): the 8192-cap apod run measured micro-1
-                                 # 41.2 GiB / micro-2 45.3 GiB / micro-4 59.2
-                                 # GiB peak (superlinear per sequence). With
-                                 # the cap now 16384, micro 4 does not fit --
-                                 # 2 is the ceiling-safe setting for 16k
-                                 # sequences (measure before raising).
-gradient_accumulation_steps: 8   # 2 DDP ranks x 2 x 8 = effective batch of 32
-                                 # sequences. USER DECISION 2026-08-15: eff 32,
-                                 # raised from 16 for training stability --
-                                 # smoke3 at effective 4 oscillated violently
-                                 # (termination collapse), smoke8k at 16
-                                 # degraded gently; bigger batches average the
-                                 # update over more trajectories. Top-4 arms:
-                                 # 512/32 = 16 steps/round; all arm: 1536/32
-                                 # = 48.
+per_device_train_batch_size: 8   # PER RANK; kl50/kl50w value (micro probe 2026-08-31 at cap 8192: 71.5 GiB peak). At cap 16384 only 2 fits (apod run: micro-4 59.2 GiB at 8192, superlinear); scripts/bucket_experiment.py sets 2 x 8 there.
+gradient_accumulation_steps: 2   # 2 DDP ranks x 8 x 2 = effective batch 32 (kl50/kl50w, 2026-08-31/09-01). USER DECISION 2026-08-15: eff 32, raised from 16 for stability (smoke3 at 4 oscillated, smoke8k at 16 degraded gently). Top-4 arms: 512/32 = 16 steps/round; 136 prompts: 17.
 effective_batch: 32              # ASSERTED by the train stage: world_size x
                                  # per_device x grad_accum must equal this, so
                                  # changing num_gpus without retuning accum

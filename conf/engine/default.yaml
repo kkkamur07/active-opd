@@ -1,7 +1,7 @@
 # vLLM engine settings. One engine per GPU per stage process, never TP
 # (apod.models.build_llm enforces this). The engine is rebuilt from the latest
 # checkpoint each round -- that rebuild IS the weight sync.
-gpu_memory_utilization: 0.90
+gpu_memory_utilization: 0.95     # kl50/kl50w value (USER 2026-08-31 asked 0.99 'if safe'; 0.95 is the max that leaves the CUDA context + cudagraphs room on an 80 GiB card; measured 76.8 GiB peak)
 max_model_len: 24576             # prompt + 16384-token response with headroom
 # Auto chunk sizing targets this many concurrent sequences per engine. 128 was
 # the pre-experiment sweet spot (A100 80GB, 2026-08) and is what the apod,

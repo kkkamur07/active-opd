@@ -33,5 +33,6 @@ eval:
   # across both engines) -- a ~75 min smoke, the price of readable curves
 
 train:
-  gradient_accumulation_steps: 2  # 2 ranks x 2 = effective batch 4
+  per_device_train_batch_size: 1  # 2 ranks x 1 x 2 = effective batch 4 (the
+  gradient_accumulation_steps: 2  # train stage asserts this product)
   effective_batch: 4
