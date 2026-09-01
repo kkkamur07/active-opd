@@ -1,187 +1,121 @@
 # Todo
 
-Working file. Phases are in order. See [docs/guide.md](docs/guide.md) for machine setup,
-version choices, and rollout findings.
+Working file. Done items carry a pointer to where the work lives (file or
+commit); the current loop is described in [docs/pipeline.md](docs/pipeline.md)
+and driven by `scripts/bucket_experiment.py`. Machine setup, version choices,
+and rollout findings are in [docs/guide.md](docs/guide.md).
 
-## Current: student trajectory collection
+Sampling in every run: `temperature=1.0, top_p=0.95, top_k=20`,
+presence_penalty **0.0** (ADR 0004; the 1.5 once written here was never used).
 
-512 prompts, one trajectory per prompt from `Qwen/Qwen3.5-2B` via vLLM.
+## Done: pipeline build-out (2026-08-13 .. 08-15)
 
-- [ ] Generate 512 student trajectories (1 rollout each)
-- [ ] Measure throughput during the run
-- [ ] Grade with math-verify against the dataset's `Answer` column
+- [x] Student trajectory collection and length/throughput/grading measurements
+      -- `scripts/token_lengths.py`, `scripts/rollout_report.py` (commits
+      686a593, c56de70); findings in docs/guide.md "Rollout findings".
+- [x] Teacher trajectories over the same prompts, same sampling -- the
+      `TEACHER_RUN` block of `scripts/bucket_experiment.py` (128 x 4 at 16384,
+      oracle16k; commit eccd79d). Dropped from kl50/kl50w as a diagnostic
+      (USER 2026-08-31: no teacher-rollout block); only the teacher-ceiling
+      eval remains (`KL50_TEACHER`, eval-only).
+- [x] Student entropy scoring `H(tau)` -- `apod/stages/entropy.py` (commit 0003b0d).
+- [x] Trajectory-level top-k selection, arms `entropy_top4` / `random_top4` /
+      `all` -- `apod/selection.py`, `conf/config.yaml`.
+- [x] Iterative loop: TRL GKDTrainer, reverse KL, checkpoint per round --
+      `apod/main.py` + `apod/stages/train.py`, ADR 0001; results in
+      docs/smoke_report.md and outputs/runs/apod.
+- [x] **Oracle-KL selection diagnostic** (exact per-trajectory reverse KL
+      between student and teacher; the quantity the beta=1 GKD objective
+      minimizes, so it upper-bounds every cheap proxy) -- `scripts/oracle_kl.py`
+      (b271920; forward KL + entropies c6a6adf; top-16 overlap ratio /
+      advantage e19da4a). Ran once on the apod round-0 pool as planned, then
+      became the selection rule itself: the KL-bucket arms (kl_high / kl_mid /
+      kl_low vs random) in oracle16k, oracle8k/4k, kl50, kl50w.
+- [x] Measure the teacher's own accuracy under the same sampling BEFORE
+      committing GPU hours -- `run_rollout_eval(KL50_TEACHER, ..., eval_only=True)`
+      in `scripts/bucket_experiment.py`; outputs/runs/kl50_teacher (avg@4 0.6115 at
+      8192) and outputs/runs/oracle16k_teacher. Every arm result is
+      read against this ceiling.
 
-Being implemented now. Not yet run, so there are no numbers for any of the three.
+## Open research items
 
-## Next: teacher trajectory generation
+- [ ] **Cheap KL-divergence proxy for selection, affordable every round.**
+      The oracle scoring (`scripts/oracle_kl.py`) IS the per-round selection
+      signal today at ~27 min per round-arm (1632 trajectories at cap 8192;
+      docs/perf_review.md). Every round's full pool is scored, so the
+      calibration data for any proxy already exists unbiased (rejected
+      trajectories included) -- regress candidate statistics against the
+      stored exact KL, per prompt, and adopt one only if per-prompt Spearman
+      and tertile agreement hold. Candidates, none evaluated yet:
+      - **MC reverse KL** -- TODO ONLY, explicitly NOT this run (USER
+        2026-08-31: "a lot of them just do mc reverse kl -- add this todo but
+        we are not doing this"). Sampled-token estimate
+        `log pi_S(y_t) - log pi_T(y_t)` averaged over the trajectory: student
+        side free from vLLM at generation time, teacher side one vLLM prefill
+        pass (`prompt_logprobs`) at ~2-3x the current scoring throughput.
+        CAVEAT: not an unbiased estimator of mean KL (sampling is
+        top_k/top_p-truncated), so it changes the selection statistic --
+        validate offline against the stored exact KL first
+        (`oracle_kl.py --analyze` has the machinery).
+      - Teacher forward on a sparse subset of positions (every Nth token or
+        top-entropy positions only): only the ordering has to be right.
+      - Top-k truncated KL (teacher's top-k logits only); teacher forward on a
+        prefix only; a smaller/quantized teacher purely as a ranking model.
+      - Entropy-profile statistics (p50/p90/max, variance, count above a
+        threshold, top1-top2 margin, early-window entropy, length-normalized
+        variants): the mean over ~8k tokens has almost no within-prompt range
+        (0.0003 nats between rank 4 and 5 at round 0), which is why
+        entropy_top4 ~= random_top4 in the apod run.
 
-- [ ] Generate `Qwen/Qwen3.5-9B` teacher trajectories over the same prompts, via vLLM,
-      with the same sampling settings as the student
-      (`temperature=1.0, top_p=0.95, top_k=20`; NO presence penalty — the
-      1.5 once written here was never used, every run has presence_penalty 0.0)
+- [ ] **Token-level entropy alongside trajectory-level.** `apod/stages/entropy.py`
+      collapses each trajectory to one mean; `scripts/oracle_kl.py` records
+      only mean student/teacher entropy per trajectory. Design space (record,
+      don't decide): keep trajectory-level selection but use token-level
+      entropy to WEIGHT or MASK the GKD loss so the reverse KL concentrates
+      where the student is uncertain (RLVR work: updating only the
+      high-entropy minority of tokens captures most of the gain). Storage is
+      small (one float per token); decide between full vectors and summary
+      percentiles deliberately.
 
-Practical facts for this step:
+- [ ] **Characterize (and possibly change) dataset difficulty.** Teacher-forced
+      ppl on reference solutions (teacher 1.43 vs student 1.53) is a weak
+      proxy: rollout accuracy is ~12-20% strict, so the student cannot SOLVE
+      these problems, and the teacher solves 61% (avg@4, 8192) --
+      arm differences live inside that window and every report must say so.
+      - [ ] Break accuracy down by MATH-500 difficulty level (1-5) for student
+            and teacher; pick the band where the teacher is strong and the
+            student weak. Needs the `level` column carried through
+            `apod/datasets/load.py` (`COLUMNS["math500"]` drops it today) into
+            `pool/eval_problems.jsonl`.
 
-- 9B in bf16 is roughly 18 GB of weights, so it fits on a single 80 GB A100 with plenty
-  left for KV cache.
-- The student engine must be torn down before the teacher engine is built. Each vLLM
-  engine reserves about 90% of the card, so two engines do not coexist in one process.
+## Run decisions (USER 2026-08-31 / 09-01) -- implemented
 
-## After that
-
-Not being built yet.
-
-- [ ] Student entropy scoring, `H(tau) = mean_t Entropy(pi_S(. | x, y_<t))`
-- [ ] Trajectory-level top-k selection under the three arms: `entropy_top4`,
-      `random_top4`, `all` (standard OPD, no selection)
-- [ ] Iterative training loop: TRL GKDTrainer, reverse KL, checkpoint per round
-      (see docs/adr/0001)
-
-## Queued (user-requested 2026-08-14, behind smoke2 + vLLM verification)
-
-- [ ] **Oracle-KL selection diagnostic — run ONCE, standalone.** (USER
-      2026-08-14: explicitly NOT a real-run launch gate — run later as its own
-      experiment; it remains the attribution tool for a null headline result.) Select top-k by the
-      ACTUAL per-trajectory reverse KL between student and teacher instead of any
-      entropy proxy. That is exactly the quantity the GKD objective minimizes, so it
-      is the oracle selection rule and upper-bounds every cheap proxy (mean entropy,
-      percentiles, margins). Cost is one teacher forward over all 12 rollouts per
-      problem — too expensive per round, cheap as a one-off OFFLINE analysis over
-      already-stored rollouts (smoke2 or real-run round 0; we keep the token npz
-      files, no new rollout stage needed). Why it matters: it disambiguates a null
-      result. If oracle-KL barely beats random_top4 → the selection premise itself is
-      weak, learned for one round of compute instead of 8 rounds x 3 arms. If
-      oracle-KL beats random substantially while entropy_top4 does not → entropy is
-      the wrong proxy and the fix is a better statistic, not a different objective.
-
-- [ ] **Cheap KL-divergence proxy for selection — affordable EVERY round.** Distinct
-      from the oracle-KL diagnostic above: the oracle is a one-off ceiling
-      measurement; this is a per-round selection signal. Problem: true reverse KL
-      needs a teacher forward over all 12 rollouts per problem (too expensive per
-      round); mean token entropy is affordable but demonstrably weak (0.0003 nats at
-      the selection boundary). Wanted: something between.
-      - [ ] **FIRST, nearly free: log per-trajectory reverse KL during training.**
-            The train stage already computes teacher logits on the selected
-            trajectories, so the true KL on the selected subset costs nothing —
-            just log it. That gives labelled data to CALIBRATE proxies: regress
-            each candidate statistic (mean/p90/max entropy, entropy variance,
-            top1-top2 margin, early-window entropy) against actual KL and pick the
-            selection statistic from evidence, not intuition. Caveat: this
-            calibration set is biased (selected = high-entropy trajectories only);
-            unbiased coverage of rejected trajectories is exactly what the one-off
-            oracle run over stored rollouts provides — the two complement each other.
-      - Teacher forward on a SPARSE SUBSET of positions (every Nth token, or only
-        top-entropy positions) — an unbiased estimator of mean KL; only the
-        ORDERING needs to be right, not the value, so few positions may suffice.
-      - Top-k truncated KL (teacher's top-k logits only) — cheap to transfer/store;
-        the tail contributes little to reverse KL since student mass concentrates.
-      - Teacher forward on a PREFIX only — if early divergence predicts total
-        divergence, a few hundred tokens may rank trajectories as well as the full
-        sequence.
-      - A smaller or quantized teacher purely as a RANKING model (real 9B teacher
-        still used for the training objective).
-      - Reuse cached teacher logits from the previous round where trajectories
-        overlap.
-
-- [ ] **Token-level entropy alongside trajectory-level, used together.**
-      `apod/stages/entropy.py` currently collapses each trajectory to a single mean.
-      That mean has almost no dynamic range within a problem: at round 0, problem 0's
-      rank-4 vs rank-5 trajectories differed by 0.0003 nats — the selection boundary
-      was pure noise, the best current explanation for entropy_top4 ~= random_top4.
-      Token-level entropy has far more spread and is not washed out by averaging over
-      1024–2048 tokens. Design space (record, don't decide): keep trajectory-level
-      entropy for SELECTION but use token-level entropy to WEIGHT or MASK the GKD
-      loss so the reverse KL concentrates where the student is actually uncertain
-      (published RLVR work shows updating only the high-entropy minority of tokens
-      captures most of the gain). Also store per-trajectory token-entropy percentiles
-      (p50/p90/max) as alternative selection statistics. Storage: one float per token
-      (2048 tok x 96 traj x 3 arms x rounds is small) — decide deliberately between
-      full vectors and summary percentiles.
-
-- [ ] **Selection statistics beyond mean entropy.** The mean over 2048 tokens is one
-      summary of the token-entropy distribution and demonstrably a weak one (0.0003
-      nats between rank 4 and 5). Candidates to evaluate against stored rollouts:
-      p50/p90/p95/max token entropy; variance/spikiness of the profile ("forking
-      points" vs uniformly diffuse uncertainty); count or fraction of tokens above an
-      entropy threshold; top1-vs-top2 logit margin and count of low-margin positions;
-      entropy over an early window only (divergence where the solution path is
-      chosen); length-normalized vs unnormalized variants (length and entropy are
-      coupled). Reference method for all of these: the oracle-KL diagnostic above.
-
-- [ ] **Characterize (and possibly change) dataset difficulty.** Semantic
-      verification measured teacher ppl 1.43 vs student ppl 1.53 on reference
-      solutions — and that GAP is the distillation signal; if the teacher barely
-      out-predicts the student there is little to transfer (consistent with the small
-      measured reverse KL, 0.152). Nuance so this is not misread: low ppl on
-      reference solutions does NOT mean the dataset is easy — rollout accuracy was
-      4.7% and avg@n 0.0625, so the student cannot SOLVE these problems; teacher-forced
-      ppl on formulaic LaTeX is a weak proxy for generation ability. The two numbers
-      don't conflict, but neither answers the real question.
-      - [ ] **FIRST: measure the teacher's own accuracy** (pass@1 and pass@n) on the
-            dataset under the same sampling config, BEFORE committing GPU hours to
-            the real run. On-policy distillation assumes the teacher is meaningfully
-            better; if the 9B teacher solves only a small fraction, its guidance is
-            mostly wrong and no objective tuning helps. Teacher accuracy is a
-            CEILING: every arm result must be read against it in the report — if the
-            teacher solves few problems, arm differences live inside a very small
-            window and the report must say so out loud.
-      - [ ] Break accuracy down by MATH-500 difficulty level (1–5) for student and
-            teacher; pick the band where the teacher is strong and the student is
-            weak — that is where distillation has headroom.
-
-## Next training run: decisions (USER 2026-08-31)
-
-- [ ] **Arms: `kl_mid` vs `random` only** (USER 2026-08-31 late: "we need
-      random, it should be random vs kl mid"). Two arms, ~50 training steps
-      (3 rounds x 16 steps at eff batch 32 = 48), batch 32. No kl_high /
-      kl_low this run; no teacher-rollout block and no teacher-pool
-      rescoring (those were diagnostics, not mechanism — see below).
-- [ ] **MC reverse-KL scoring — TODO ONLY, explicitly NOT this run** (USER
-      2026-08-31: "a lot of them just do mc reverse kl — add this todo but we
-      are not doing this"). Replace the exact full-vocab reverse KL with the
-      sampled-token estimate log pi_S(y_t) - log pi_T(y_t) averaged over the
-      trajectory: student side free from vLLM at generation time, teacher
-      side one vLLM prefill pass (prompt_logprobs) at ~2-3x the current
-      scoring throughput (~25 min vs ~72 min per round-arm). CAVEAT: not an
-      unbiased estimator of mean KL (sampling is top_k/top_p-truncated
-      student, not the full student), so it changes the selection statistic.
-      Before ever adopting: validate offline against the stored exact KL on
-      the oracle16k round-0 pool (per-prompt Spearman + tertile agreement;
-      analysis machinery already in scripts/oracle_kl.py --analyze).
-- [ ] **No `all` control arm next run** (USER 2026-08-31: "this time we are not
-      going to do the comparison with all"). The all-12-rollouts arm was the
-      no-selection baseline in oracle16k (1536 rows, 48 steps/round, 3x the
-      bucket arms' training compute); the next run trains selection arms only.
-      Remove `all` from the run's ARMS tuple when building the driver.
-- **Effective batch: stays 32, no change needed.** USER asked for 32 believing
-  the current value was 16; verified 2026-08-31 that conf/train/gkd.yaml is
-  already 2 per-device x 8 accum x 2 ranks = 32 (raised from 16 on
-  2026-08-15, asserted via train.effective_batch). The "16" is the bucket
-  arms' optimizer steps per round (512 trajectories / 32), not the batch.
-
-## Optimizer-state persistence across rounds (USER 2026-09-01)
-
-- [x] **IMPLEMENTED 2026-09-01 in the kl50w run** (`--kl50w` in
-      scripts/bucket_experiment.py + `train.persist_optimizer` in
-      apod/stages/train.py): Adam state saved per arm per round
-      (name-keyed, remapped on load so restarts work at any round
-      boundary), per-round warmup(2)+cosine-to-10% LR cycles, peak LR
-      picked by a 3-candidate probe (2e-5 / 1e-5 / 5e-6) on the real
-      round-0 kl_high selection. Round 0 banked from kl50.
-- [ ] **Keep the optimizer states across rounds** — "we need to keep the
-      optimizer states as well - this will make a consistent run with lr
-      cycles - because apparently it helps the student." Today each round's
-      train stage builds a fresh GKDTrainer from weights only (no
-      resume_from_checkpoint, save_strategy 'no'), so Adam's m/v and step
-      counter reset every round; the t=1 bias-corrected update is a
-      magnitude-blind sign step, producing the measured step-2 loss/grad-norm
-      spike each round (kl50: grad_norm 0.56 -> 6.12 at r1 restart).
-      A warmup_steps=2 + constant_with_warmup patch was verified to absorb it
-      (kl50 round-2: no spike, grad_norm 0.53; warmup-trained artifacts kept
-      in outputs/runs/kl50_warmup_backup/) but was trained OUT of kl50 the
-      same day so all rounds share one optimizer regime. The durable fix is
-      saving/loading optimizer state per arm per round + an LR schedule
-      spanning rounds ("lr cycles").
+- [x] **kl50**: kl_high / kl_mid / kl_low / random at cap 8192, 136 prompts x
+      12 rollouts, 544 selected rows = 17 steps/round x 3 rounds = 51 steps at
+      effective batch 32 -- `--kl50` in `scripts/bucket_experiment.py`
+      (commit 4290a4e). Supersedes the earlier "kl_mid vs random only" note
+      (USER 2026-08-31 late: all three KL buckets plus random).
+- [x] **No `all` control arm** (USER: "not going to do the comparison with
+      all") -- `ARMS = ("kl_high", "kl_mid", "kl_low", "random")` in
+      `bucket_experiment.py:main`.
+- [x] **Effective batch 32** was already the setting (2 ranks x per-device x
+      accum; asserted by `train.effective_batch` in `apod/stages/train.py`).
+      The "16" USER remembered was the bucket arms' optimizer steps per round.
+- [x] **Optimizer state persisted across rounds + LR cycles** (USER
+      2026-09-01: "keep the optimizer states as well ... consistent run with lr
+      cycles") -- `--kl50w` + `train.persist_optimizer` (`apod/stages/train.py`:
+      name-keyed Adam state saved per arm per round, remapped on load so a
+      restart works at any round boundary; the driver keeps one
+      `optimizer_state.pt` per arm). Per-round warmup(1) +
+      `cosine_with_min_lr(min_lr_rate=0.1)`; peak LR 5e-6 from the
+      3-candidate probe (`outputs/runs/kl50w/lr_probe.json`); the per-arm
+      optuna sweep (`scripts/lr_sweep.py`, 10 trials/arm over [1e-6, 1e-2])
+      writes the common-LR verdict to the same file. Round 0 banked from
+      kl50. Diagnosis that motivated it: a fresh trainer per round reset
+      Adam's moments, and the t=1 bias-corrected update produced the
+      measured step-2 loss/grad-norm spike each round (kl50: grad_norm 0.56
+      -> 6.12 at the r1 restart); warmup-trained kl50 artifacts kept in
+      outputs/runs/kl50_warmup_backup/.
 
 ## Infrastructure notes (2026-08-14)
 
@@ -214,3 +148,25 @@ Not being built yet.
 
 To review the changes : meaning that okay a beautiful way to review the essential changes and the assumptions, essentially what was changed and why ?
 Grill with docs for ML research with exploration built it, currently these models don't help you build the intuition and search up the spaces more ? 
+
+### Dimensionality : 
+
+- Correctness : Teacher should be correct and student should be wrong. Selection on these 4 combinations. Maybe the most effective one will be teacher is correct is student is wrong. 
+Trick : 3000 mathematical questions, ask the teacher and student to generate the answers 4 rollouts for each questions and increase the max token generation as 32000 -> this is just not possible and categorize them in 4 buckets - we can easily find 800 questions. Student is wrong if it is wrong for 3 times or 4 times and then the same applies to teacher as well. What is wrong and what is correct. 
+
+- Distributional Similarity : Distributional similarity is very important
+      - We need to test on other evaluations as well 100 training steps per step and evaluations should be done per 10 steps with logging the overlap ratio and training losses per training step as well. 
+      - AIME evaluations as well. 
+
+- Entropy : For selection of the trajectories. Entropy incentivizes to select RKL we need to find this and run more experiments on this. 
+
+- Diversity of the student rollouts : For each type I think we need is covered. 
+
+#### Some questions to explore as well. 
+- Which question to train on is also a good concern, for the questions - this would be an idea to try. Certainity on the question would be a good dimensionality to look at. 
+- A way to combine all 3 indicators to understand what would be a good sample to learn from -> I need to do research on this as well. 
+
+### Literature Review as well. 
+- Other dimensionality : Data selection and active learning papers as well - do some literature search please. 
+
+Presentations : Hinrich doesn't have enough background on OPD, you may want to talk about further intuition, spend several minutes on the background. You maybe want to give more intuition and give clearn definition of what it is. Explanation of the results ( consistent terms ) -> A professor is a professor because judgement has to be good -> What is the motivation of doing this. We are designing better training strategy because OPD 

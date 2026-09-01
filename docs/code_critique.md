@@ -1,3 +1,10 @@
+> **Status (2026-09-01): historical record.** Falsification pass from 2026-08-14,
+> before smoke3. Everything under "Fixed" is in the tree (`resolve_model_path`,
+> `collect_eos_ids`, resume gating, materialised eval set, fingerprint); the
+> "Consciously NOT fixed" list is still accurate for `apod/main.py`. The
+> KL-bucket driver (`scripts/bucket_experiment.py`) and `scripts/oracle_kl.py`
+> post-date this review and were not covered by it.
+
 # Codebase self-critique (2026-08-14, pre-smoke3)
 
 User-ordered falsification pass over the whole pipeline before smoke3, biased

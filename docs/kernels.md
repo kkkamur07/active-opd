@@ -100,3 +100,17 @@ because the linear layers are a Python loop over 64-token chunks. Per
 round-arm: train 25.4 -> ~13-16 min, oracle scoring 27.5 -> ~15-18 min; the
 LR sweep shrinks proportionally. Settle it with one A/B: one train step and
 one scoring shard on a round-0 selection, fallback vs kernels.
+
+## Measured 2026-09-01 (A100-80GB, bf16, seq 8192, GPU 1, `.venv-kernels`)
+
+| workload | torch fallback | fla 0.5.2 | speedup |
+| --- | ---: | ---: | ---: |
+| Qwen3.5-2B forward, batch 4 | 20.3k tok/s (1.61 s) | 41.7k tok/s (0.79 s) | 2.05x |
+| Qwen3.5-9B forward, batch 4 | 7.0k tok/s (4.66 s) | 11.8k tok/s (2.79 s) | 1.67x |
+| Qwen3.5-2B fwd+bwd, batch 2, grad ckpt | 1.5k tok/s (11.08 s) | 8.5k tok/s (1.92 s) | 5.8x |
+
+Peak memory unchanged (58.4 GiB for the train case). The backward of the torch
+chunk fallback is the dominant training cost; the fused kernel removes it.
+Installed into the main `.venv` on 2026-09-01 after the LR sweep was stopped;
+no run was live. Any run whose earlier steps were trained without the kernels
+(kl50w banks step 0 from kl50) mixes the two paths at bf16 rounding level.

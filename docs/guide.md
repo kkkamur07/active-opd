@@ -153,16 +153,16 @@ CUDA minor versions do not need to match. This machine has a 13.2 driver, a 13.0
 
 ### Sampling defaults
 
-The collection defaults follow the Qwen3.5-2B model card for thinking-mode math tasks:
+The pipeline samples with the Qwen3.5-2B model card's thinking-mode settings, minus the presence penalty (`conf/sampling/default.yaml`, ADR 0004):
 
 ```text
 temperature=1.0
 top_p=0.95
 top_k=20
-presence_penalty=1.5
+presence_penalty=0.0
 ```
 
-The presence penalty means traces are not sampled from the unmodified student policy. Record the settings in `outputs/trajectories/manifest.json` when collecting data.
+The penalty is off so that generation, entropy/KL scoring, and the GKD objective share one distribution. The model card's `presence_penalty=1.5` was used only by the early measurement scripts (`scripts/token_lengths.py` still defaults to it); the incremental processor that made it affordable is described under "Rollout findings" and stays in the tree, dormant. The driver stamps the sampling settings into each round's `manifest.json`.
 
 ## CUDA troubleshooting
 

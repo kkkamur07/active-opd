@@ -11,30 +11,76 @@ training are sampled from the student (on-policy).
 **Teacher** — `Qwen/Qwen3.5-9B`. Frozen. Never sampled from; only provides per-token
 log-probabilities used as the distillation target.
 
-**Trajectory (trace)** — one sampled student completion for one prompt: the token
+**Question** — one math problem from the training pool (OpenThoughts) or an eval set.
+The word "prompt" is retired (2026-09-01); a question is what gets labelled, selected
+and trained on.
+
+**Question bank** — the labelled pool for the correctness experiment: every swept
+question with its teacher and student rollouts, strict grades, truncation flags and
+bucket label. Built once; arms draw their questions from it.
+
+**Trajectory (trace)** — one sampled student completion for one question: the token
 sequence and its metadata (lengths, sampling settings, grade).
 
-**Rollout** — the act of sampling trajectories from the student for a prompt pool.
-One prompt yields `num_rollouts` trajectories.
+**Rollout** — the act of sampling trajectories from a model for a set of questions.
+One question yields `num_rollouts` trajectories.
 
 **Trajectory entropy `H(τ)`** — `mean_t Entropy(π_S(· | x, y_<t))` over response
 positions: the student's average per-token predictive entropy along its own trace.
 The uncertainty score used for active selection.
 
-**Selection policy** — the rule that picks which trajectories from a rollout pool are
-used for training. Selection is **trajectory-level**: applied per prompt, over that
-prompt's own rollouts, so every prompt contributes to training in every arm. The
-experiment compares: entropy top-k, random-k, and all (no selection). Prompt-level
-selection (choosing which prompts deserve teacher effort at all) is deliberately out
-of scope for this pass.
+**Question entropy `H(q)`** — the student's trajectory entropy `H(τ)` averaged over
+the student's own rollouts of a question: the question-level uncertainty score used
+for question selection (active learning's uncertainty sampling, taken from the model
+being trained). Teacher entropy plays no part in selection; the teacher is the
+oracle whose effort selection is meant to spend well.
+
+**Selection policy** — the rule that picks what is used for training. Selection acts
+at two levels, and the two compose:
+
+- **Question selection** — which questions receive teacher effort and enter a
+  training set at all. Not a policy of the first experiments (they used every
+  question); introduced with correctness buckets (2026-09-01).
+- **Trajectory selection** — for a question that is in, which of its own rollouts are
+  trained on (e.g. kl_mid: the middle-KL third of 12 rollouts). Every kl50 result is a
+  trajectory-selection result.
+
+**No-selection baseline (random)** — keeping k of n rollouts uniformly at random is,
+in distribution, the same as sampling only k rollouts and training on all of them:
+both are k i.i.d. draws from the student. So "random-k" *is* standard OPD at the
+same training budget, and a separate "all n rollouts" arm is retired (2026-09-01):
+it either triples the budget or trains on fewer questions, and answers nothing that
+random-k does not.
+
+**Correctness bucket** — a question-level label from teacher and student strict
+correctness at the run's cap. A model is *correct* on a question when at least 3 of
+its 4 rollouts are strictly correct and *wrong* when at most 1 of 4 is. The teacher
+label is fixed (frozen teacher); the student label comes from the base student's
+rollouts at labelling time. Four buckets, each an arm of the correctness experiment:
+
+- **TC/SW** — teacher correct, student wrong. The canonical distillation case.
+- **TC/SC** — both correct.
+- **TW/SW** — both wrong. At cap 8192 most teacher-wrong is teacher cap-hit, so this
+  arm tests whether an unfinished teacher trace still transfers.
+- **Mixed** — every labelled question in none of the three above: either model in
+  between (2 of 4), and the near-empty teacher-wrong/student-correct cell.
 
 **Arm** — one full experimental run of the loop under one selection policy. Arms are
 run sequentially and never share rollouts, because their students diverge after the
-first round.
+first training step.
 
-**Round** — one turn of the loop for one arm: eval → rollout → score → select →
-train → checkpoint. The checkpoint is the weight hand-off between the trainer and
-the next round's rollout engine.
+**Training step** — one optimizer update on 32 trajectories (the effective batch).
+The unit of training budget and the x-axis of every plot. "Round" is retired
+(2026-09-01): nothing is counted in rounds any more.
+
+**Refresh** — what happens every 10 training steps: the current weights are
+evaluated, and the next 10 steps' questions are rolled out from those weights so
+training stays on-policy. A refresh is a cadence, not a budget unit.
+
+**Strict correctness** — a trajectory is correct only if a `\boxed{}` answer is
+present and Math-Verify accepts it. Cap-hit (truncated) trajectories with no boxed
+answer are wrong, at every cap, for labels and for eval alike. Truncation is a
+property of the regime we train and evaluate in, not an excuse to relabel.
 
 **OPD (on-policy distillation)** — training the student on its own sampled
 trajectories, minimising reverse KL to the teacher at each trace position.

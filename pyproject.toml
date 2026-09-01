@@ -63,3 +63,8 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 torchaudio = { index = "pytorch-cu130" }
+
+[dependency-groups]
+dev = [
+    "optuna==4.9.0",
+]

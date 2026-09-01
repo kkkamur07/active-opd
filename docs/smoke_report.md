@@ -1,3 +1,11 @@
+> **Status (2026-09-01): historical record.** This is the 2026-08-14 smoke cycle
+> for the entropy-selection `apod` run (entropy_top4 / random_top4 / all,
+> `python -m apod.main`). The verification results (checkpoint reload, compile
+> caches, loss identities, EOS handling) still describe the code in use; the
+> projections, gates, and go/no-go numbers were superseded by the KL-bucket
+> experiments driven by `scripts/bucket_experiment.py` (oracle16k, oracle8k/4k,
+> kl50, kl50w). Current costs: `docs/perf_review.md`; current loop: `docs/pipeline.md`.
+
 # Smoke test report
 
 Hardware: 2x A100 80GB (driver R595, Debian 13). Stack: TRL 1.10.0 GKDTrainer,
