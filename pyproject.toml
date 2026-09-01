@@ -28,6 +28,12 @@ dependencies = [
 vllm = ["vllm==0.26.0"]
 # Later training phase; pulls the vllm extra at the same ceiling.
 train = ["trl[vllm]==1.10.0"]
+# Fused Triton kernels for Qwen3.5's Gated DeltaNet layers on the HF side
+# (train, oracle scoring, entropy). transformers binds the `fla` package at
+# import time when it is installed; pure-Python wheels, no nvcc, no torch or
+# triton change (verified against the cu130 venv: only fla-core + this).
+# NOT bitwise-neutral (bf16-level): fresh runs only. See docs/kernels.md.
+kernels = ["flash-linear-attention==0.5.2"]
 
 [project.scripts]
 apod-lengths = "scripts.token_lengths:main"
