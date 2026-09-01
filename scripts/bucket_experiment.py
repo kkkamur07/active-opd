@@ -80,6 +80,12 @@ TRAIN_ROUNDS = 3  # trains at rounds 0..2; round 3 is the terminal eval-only.
                   # terminal.
 NUM_ROLLOUTS = 12
 TEACHER_ROLLOUTS = 4
+# --eval-num-problems: evaluate only the first N materialized problems in the
+# INTERMEDIATE rounds (0 < round < terminal), the apod.main protocol
+# (conf/eval intermediate_num_problems). None = the full set every round,
+# which is what kl50/kl50w ran. Round 0 (the anchor) and the terminal
+# eval-only round always use the full set regardless.
+EVAL_NUM_PROBLEMS: int | None = None
 
 
 def log(msg: str) -> None:
@@ -170,6 +176,8 @@ def run_rollout_eval(run_dir: Path, arm: str, rnd: int, *, eval_only: bool) -> N
             "--run-dir", str(run_dir), "--arm", arm, "--round", str(rnd),
             "--shard", str(shard), "--num-shards", "2",
         ] + (["--eval-only"] if eval_only else [])
+        if EVAL_NUM_PROBLEMS is not None and rnd > 0 and not eval_only:
+            cmd += ["--eval-num-problems", str(EVAL_NUM_PROBLEMS)]
         env = {**os.environ, "HF_HUB_OFFLINE": "1", "CUDA_VISIBLE_DEVICES": str(shard)}
         log("launch: " + " ".join(cmd[3:]))
         procs.append(subprocess.Popen(cmd, env=env))
@@ -816,10 +824,17 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=None,
                         help="override train LR for this (re)launch, e.g. 5e-6 "
                              "for the round-3 extension per the probe verdict")
+    parser.add_argument("--eval-num-problems", type=int, default=None,
+                        help="intermediate rounds evaluate only the first N "
+                             "problems (round 0 and the terminal round always "
+                             "run the full set); default: full set every round")
     args = parser.parse_args()
     if args.lr is not None:
         global LR_OVERRIDE
         LR_OVERRIDE = args.lr
+    if args.eval_num_problems is not None:
+        global EVAL_NUM_PROBLEMS
+        EVAL_NUM_PROBLEMS = args.eval_num_problems
     if args.kl50 or args.kl50w:
         RUN_DIR = KL50W_DIR if args.kl50w else KL50_DIR
         CAP = 8192
