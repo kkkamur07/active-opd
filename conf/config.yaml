@@ -12,6 +12,7 @@ defaults:
   - selection: default
   - train: gkd
   - tracking            # conf/tracking.yaml -> cfg.tracking (W&B, apod/tracking.py)
+  - bank
   - _self_
 
 # Run identity. All artifacts land under output_dir; re-running with the same

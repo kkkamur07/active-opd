@@ -217,6 +217,102 @@ directory per process; upload them with
 `wandb sync <run_dir>/wandb/offline-run-*` — every directory of an arm
 carries the same id, so they fill in one run.
 
+## Question bank
+
+`python -m apod.bank` (module `apod/bank.py`, settings `conf/bank.yaml` under
+`cfg.bank`) builds the labelled question pool of the correctness experiment
+(ADR 0005) at `outputs/runs/<bank.name>/` (`bank-8k`). It is not a run: no
+arms, no training steps. It is built once and read by the drivers of runs 1
+and 3.
+
+Build loop (resumable; each step is one `apod.bank` worker subprocess per GPU
+with `CUDA_VISIBLE_DEVICES` pinned, sharded by `example_index % num_shards`;
+one vLLM engine per process, torn down before the next step):
+
+1. `pool/questions.jsonl` — every usable OpenThoughts question in one seeded
+   order (`data.pool_seed`, a permutation, so raising `bank.student_questions`
+   later extends the same order without regenerating anything).
+2. Student sweep, chunk by chunk (`chunk_questions`, 1000) up to
+   `student_questions` (14,500): `num_rollouts` (4) student rollouts at
+   `max_new_tokens` (8192), reusing the rollout stage's `RolloutWriter` +
+   `run_session` (request packing, chunk seeds with the chunk index as the
+   seed round and `chunk_questions` as the stride, grading pool overlapped
+   with generation, npz + EOS repair, done-markers). After each chunk, its
+   entropy: `student/entropy/` via the entropy stage's `trace_scores` under
+   the HF student, H(q) = mean H(tau) over the question's rollouts.
+3. Teacher sweep, narrow: each teacher chunk is the next `chunk_questions`
+   *eligible* questions in pool order, where eligible = not teacher-swept,
+   student label C or W, and some bucket the teacher label could put it in
+   (C -> both_right or mixed; W -> teacher_right_student_wrong, both_wrong or
+   mixed) is still below `target_per_bucket` (800). Student-M questions are
+   mixed without a teacher sweep. The plan of chunk C is persisted in
+   `teacher/chunks/chunk_C.json` before it runs, so a resume reruns the same
+   chunk. Stops when every bucket is full or nothing is eligible.
+
+Labels (strict, CONTEXT.md): a rollout is correct iff `\boxed` present,
+Math-Verify accepts it, and not cap-hit. Per model, `>= correct_min` (3) of
+`num_rollouts` correct = C, `<= wrong_max` (1) = W, else M. Buckets:
+TC/SW `teacher_right_student_wrong`, TC/SC `both_right`, TW/SW `both_wrong`,
+`mixed` = any labelled question in none of those (student-M, either model M,
+TW/SC), `unlabelled` = student swept, teacher not (yet).
+
+```
+outputs/runs/bank-8k/
+  resolved_config.yaml            conf/ composed; rollout.num_rollouts, rollout.num_prompts
+                                  (= chunk_questions, the seed stride) and
+                                  sampling.max_new_tokens stamped from bank.*
+  pool/questions.jsonl            {example_index, id, prompt, reference}  (whole dataset, seeded order)
+  questions.jsonl                 the bank: one row per student-swept question, pool order
+  student/trajectories.shard{K}.jsonl, student/tokens/example_XXXXX.npz   rollout layout (schemas above)
+  student/done.chunk{CCC}.shard{K}
+  student/entropy/entropy.shard{K}.jsonl, done.chunk{CCC}.shard{K}, meta.json
+  teacher/trajectories.shard{K}.jsonl, teacher/tokens/, done.chunk{CCC}.shard{K}
+  teacher/chunks/chunk_{CCC}.json  {chunk, example_indices, bucket_counts}
+```
+
+`questions.jsonl` — one row per student-swept question:
+`{example_index, id, question, reference, chunk, student_grades[4],
+student_truncated[4], student_lengths[4], teacher_grades[4]|null,
+teacher_truncated[4]|null, teacher_lengths[4]|null, student_label C|W|M,
+teacher_label C|W|M|null, bucket, question_entropy|null}` — grades are
+strict booleans per rollout_index; `question` is the prompt text the
+rollouts were rendered from (the pool row's `prompt`, boxed instruction
+included); `chunk` = `example_index // chunk_questions`. Rewritten from the
+raw shards by every build step and by `--report`.
+
+```
+python -m apod.bank [--gpus 0,1] [bank.student_questions=N] [bank.target_per_bucket=N]
+    build or resume (a rerun with nothing pending issues no requests); only
+    those two bank.* settings may change on an existing bank -- a different
+    cap/rollout count is a different bank (bank.name)
+python -m apod.bank --report [--bank-dir D]
+    relabels, then prints bucket counts vs target, per-bucket cap-hit
+    composition (student, teacher, teacher 4/4 cap-hit), and the remaining
+    generation: student questions left, teacher questions the unfilled
+    buckets still need at the bank's own P(teacher label | student label),
+    hours at bank.student_trajectories_per_min (118 on 2 GPUs at 8192; the
+    teacher bank.teacher_slowdown = 2.5x slower), and how far to raise
+    student_questions when a bucket cannot fill from the current sweep
+python -m apod.bank --bank-dir D --sweep student|teacher --chunk C --shard K --num-shards N
+python -m apod.bank --bank-dir D --entropy --chunk C --shard K --num-shards N
+    the workers the build launches (one GPU each)
+```
+
+Reading the bank from a driver (`apod.bank`):
+
+```python
+rows = load_bank(bank_dir)                    # questions.jsonl rows, pool (seeded) order
+arm_rows = bucket_questions(rows, "both_wrong")   # rows of one bucket, same order; take the first 800
+bucket_counts(rows)                           # Counter over BUCKETS
+label_questions(bank_dir, cfg)                # rebuild questions.jsonl from the raw shards
+# run 3: sort rows by row["question_entropy"] (None = not scored yet)
+# a driver's pool row from a bank row: {"example_index", "id", "prompt": row["question"],
+#   "reference": row["reference"], ...}
+```
+
+Tests: `tests/test_bank.py` (CPU; the FakeLLM of
+`tests/test_rollout_eval_merged.py`, workers in-process).
+
 ## Selection interface (`apod/selection.py`)
 
 ```python
@@ -234,6 +330,7 @@ def select_trajectories(arm, trajectories, *, k, num_rollouts, seed):
 - rollout/eval agent: `apod/stages/rollout_eval.py`
 - scoring/selection agent: `apod/stages/entropy.py`, `apod/selection.py`
 - driver agent: `apod/main.py`, `apod/plotting.py`
+- question-bank agent: `apod/bank.py`, `conf/bank.yaml`, `tests/test_bank.py`
 - train stage (main session): `apod/stages/train.py`, `conf/`
 - `pyproject.toml`, `CONTEXT.md`, ADRs, existing `apod/` modules: main
   session only. Reuse existing helpers (`apod.models.generate_vllm`,
