@@ -1,0 +1,22 @@
+# AIME 2025 + 2026 pooled terminal eval (ADR 0005). Not a per-round monitor:
+# at the training cap (8192) a 30-problem set is mostly truncation, and it
+# cannot separate arms round-to-round (naive SE ~2 pts at 60x16). It runs
+# once per final checkpoint through scripts/terminal_eval.py, which passes
+# --eval-dataset aime2526 to apod.stages.rollout_eval; the stage then reads
+# pool/eval_problems_aime2526.jsonl and writes eval_aime2526/, leaving the
+# MATH-500 eval/ layout untouched.
+# Sampling params are shared with rollouts (conf/sampling) on purpose -- do
+# not add eval-specific sampling here. Only the cap differs (terminal_eval
+# --max-new-tokens, default 16384) and it is stamped into the derived run's
+# resolved_config.yaml.
+dataset: aime2526                # key into apod.datasets.load.COMBINED (30 + 30)
+num_problems: 60                 # the whole pooled set; ids keep aime2025:/aime2026: prefixes
+num_samples: 16                  # samples per problem -> avg@16 / pass@16 (960 trials)
+# Same field as math500.yaml so the schema is uniform; the terminal eval
+# always runs the full set (the stage is launched without --eval-num-problems).
+intermediate_num_problems: 60
+# Per-problem seeds follow the MATH-500 rule exactly:
+#   seed + eval_seed_offset + round * num_problems + problem_index
+# (apod.stages.rollout_eval.run_eval), so a re-run of the same checkpoint
+# reproduces sample-for-sample and rounds differ.
+eval_seed_offset: 100000
