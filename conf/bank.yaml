@@ -1,0 +1,32 @@
+# @package bank
+# Question bank for the correctness experiment (ADR 0005): a seeded sweep of
+# OpenThoughts questions with 4 student rollouts each, strict 3-of-4 labels,
+# student question entropy H(q), and a NARROW teacher sweep (4 rollouts only
+# where the teacher's label can still fill a bucket). Built once by
+# `python -m apod.bank`; arms draw their questions from questions.jsonl.
+name: bank-8k
+dir: outputs/runs/${bank.name}
+# Rollouts per question per model and the cap they are generated at. The cap
+# is part of the bank's identity (labels are regime-specific, ADR 0005): a
+# different cap is a different bank, never an edit of this one.
+num_rollouts: 4
+max_new_tokens: 8192
+# Strict label from num_rollouts grades: correct when >= correct_min are
+# strictly correct, wrong when <= wrong_max are, mixed (M) in between.
+correct_min: 3
+wrong_max: 1
+# The pool is the whole usable dataset in one seeded order (data.pool_seed);
+# the student sweeps its first student_questions in chunks of chunk_questions
+# (one engine session per chunk per GPU), and every teacher chunk is the next
+# chunk_questions eligible questions in that same order. student_questions
+# and target_per_bucket may be raised on an existing bank
+# (`python -m apod.bank bank.student_questions=20000`); nothing else may.
+chunk_questions: 1000
+student_questions: 14500
+target_per_bucket: 800
+# Measured throughput for the --report cost estimate: student trajectories per
+# minute at cap 8192 on throughput_gpus cards (kl50 runs), and the teacher's
+# per-token cost relative to the student.
+student_trajectories_per_min: 118
+teacher_slowdown: 2.5
+throughput_gpus: 2
