@@ -259,6 +259,58 @@ def run_eval(
     n_truncated = 0
     response_tokens = 0
 
+    # Grading of chunk k runs in the worker processes WHILE chunk k+1
+    # generates; its rows are written and its progress line printed once that
+    # generate returns. Executor.map submits every item immediately and only
+    # blocks when its iterator is consumed, so the map iterator is the chunk's
+    # batch of futures. The requests (texts, per-problem seeds, n) are built
+    # exactly as before -- only when the verdicts are consumed moves. The
+    # price is one chunk of durability: a crash during chunk k+1's generate
+    # also loses chunk k's unwritten rows, which row-level resume regenerates.
+    pending_grades: list[tuple[int, list, Any, float]] = []
+
+    def drain() -> None:
+        nonlocal generate_seconds, generated_tokens, n_correct, n_total, n_truncated, response_tokens
+        for done, flat, verdicts, seconds in pending_grades:
+            chunk_tokens = 0
+            for (problem_index, example, sample_index, completion), verdict in zip(flat, verdicts):
+                truncated = completion.finish_reason == "length"
+                chunk_tokens += len(completion.token_ids)
+                response_tokens += len(completion.token_ids)
+                n_correct += int(verdict["correct"])
+                n_total += 1
+                n_truncated += int(truncated)
+                append_jsonl(
+                    eval_path,
+                    {
+                        "problem_index": problem_index,
+                        "sample_index": sample_index,
+                        "id": example["id"],
+                        "response_length": len(completion.token_ids),
+                        "truncated": bool(truncated),
+                        "correct": bool(verdict["correct"]),
+                        # Distinguishes "answered wrong" from "output became
+                        # unparseable" -- a template/thinking regression would
+                        # otherwise look identical to a capability drop.
+                        "has_answer": bool(verdict["has_answer"]),
+                        "has_boxed": bool(verdict["has_boxed"]),
+                        "gold_parsed": bool(verdict["gold_parsed"]),
+                    },
+                )
+            generate_seconds += seconds
+            generated_tokens += chunk_tokens
+            wall = time.monotonic() - started
+            eta = (wall / done) * (len(pending) - done) if done else 0.0
+            print(
+                f"eval  problems {done}/{len(pending)}  {seconds:.1f}s  "
+                f"gen {chunk_tokens / seconds if seconds else 0.0:.0f} tok/s "
+                f"(run {generated_tokens / generate_seconds if generate_seconds else 0.0:.0f})  "
+                f"correct {n_correct}/{n_total}  truncated {n_truncated}  "
+                f"elapsed {format_duration(wall)}  eta {format_duration(eta)}",
+                flush=True,
+            )
+        pending_grades.clear()
+
     for chunk_start in range(0, len(pending), chunk_size):
         chunk = pending[chunk_start : chunk_start + chunk_size]
         texts = [
@@ -280,60 +332,21 @@ def run_eval(
         seconds = time.perf_counter() - began
         memory.sample()
 
-        chunk_tokens = 0
         # Grade the whole chunk in worker processes (math-verify is CPU-bound
-        # sympy with signal-based timeouts, so processes, not threads); the
-        # GPU otherwise idles ~34 ms per sample while grading runs serially.
+        # sympy with signal-based timeouts, so processes, not threads).
         flat = [
             (problem_index, example, sample_index, completion)
             for (problem_index, example), request_output in zip(chunk, outputs)
             for sample_index, completion in enumerate(request_output.outputs)
         ]
-        verdicts = list(
-            graders.map(
-                grade,
-                (str(c.text) for _, _, _, c in flat),
-                (ex["answer"] for _, ex, _, _ in flat),
-            )
+        verdicts = graders.map(
+            grade,
+            [str(c.text) for _, _, _, c in flat],
+            [ex["answer"] for _, ex, _, _ in flat],
         )
-        for (problem_index, example, sample_index, completion), verdict in zip(flat, verdicts):
-            truncated = completion.finish_reason == "length"
-            chunk_tokens += len(completion.token_ids)
-            response_tokens += len(completion.token_ids)
-            n_correct += int(verdict["correct"])
-            n_total += 1
-            n_truncated += int(truncated)
-            append_jsonl(
-                eval_path,
-                {
-                    "problem_index": problem_index,
-                    "sample_index": sample_index,
-                    "id": example["id"],
-                    "response_length": len(completion.token_ids),
-                    "truncated": bool(truncated),
-                    "correct": bool(verdict["correct"]),
-                    # Distinguishes "answered wrong" from "output became
-                    # unparseable" -- a template/thinking regression would
-                    # otherwise look identical to a capability drop.
-                    "has_answer": bool(verdict["has_answer"]),
-                    "has_boxed": bool(verdict["has_boxed"]),
-                    "gold_parsed": bool(verdict["gold_parsed"]),
-                },
-            )
-
-        generate_seconds += seconds
-        generated_tokens += chunk_tokens
-        done = min(chunk_start + chunk_size, len(pending))
-        wall = time.monotonic() - started
-        eta = (wall / done) * (len(pending) - done) if done else 0.0
-        print(
-            f"eval  problems {done}/{len(pending)}  {seconds:.1f}s  "
-            f"gen {chunk_tokens / seconds if seconds else 0.0:.0f} tok/s "
-            f"(run {generated_tokens / generate_seconds if generate_seconds else 0.0:.0f})  "
-            f"correct {n_correct}/{n_total}  truncated {n_truncated}  "
-            f"elapsed {format_duration(wall)}  eta {format_duration(eta)}",
-            flush=True,
-        )
+        drain()  # the previous chunk: graded while this one generated
+        pending_grades.append((min(chunk_start + chunk_size, len(pending)), flat, verdicts, seconds))
+    drain()
 
     wall = time.monotonic() - started
     accuracy = n_correct / n_total if n_total else 0.0
@@ -372,7 +385,43 @@ def run_rollouts(
     n_repaired = 0
     throughput: dict[str, Any] = {}
 
+    # Same overlap as run_eval: a prompt's grades are submitted as soon as its
+    # batch is packed and consumed when the NEXT chunk's generate returns
+    # (on_chunk fires right after it), so grading never idles the engine.
+    # The npz is still written immediately; only the jsonl rows wait, so a
+    # crash during the next generate costs one chunk of rows, which row-level
+    # resume regenerates (overwriting that chunk's npz files).
+    pending_grades: list[tuple[int, dict[str, Any], dict[str, Any], Any]] = []
+
+    def drain() -> None:
+        nonlocal n_correct, n_total
+        for position, row, batch, verdicts in pending_grades:
+            grades = list(verdicts)
+            n_correct += sum(g["correct"] for g in grades)
+            n_total += len(grades)
+            chunk_seed = base_seed + (position // chunk_size) * chunk_size
+            for rollout_index, verdict in enumerate(grades):
+                append_jsonl(
+                    traj_path,
+                    {
+                        "example_index": int(row["example_index"]),
+                        "rollout_index": rollout_index,
+                        "id": row["id"],
+                        "prompt_length": int(batch["prompt_length"]),
+                        "response": str(batch["responses"][rollout_index]),
+                        "response_length": int(batch["response_lengths"][rollout_index]),
+                        "truncated": bool(batch["truncated"][rollout_index]),
+                        "finish_reason": str(batch["finish_reasons"][rollout_index]),
+                        "correct": bool(verdict["correct"]),
+                        "has_answer": bool(verdict["has_answer"]),
+                        "has_boxed": bool(verdict["has_boxed"]),
+                        "seed": chunk_seed,
+                    },
+                )
+        pending_grades.clear()
+
     def on_chunk(metrics: dict[str, Any]) -> None:
+        drain()  # the previous chunk's grades finished during this generate
         throughput.update(metrics["cumulative"])
         memory.sample()
         cumulative = metrics["cumulative"]
@@ -410,33 +459,12 @@ def run_rollouts(
         # stored ids, and what the trainer feeds are one and the same thing.
         n_repaired += ensure_trailing_eos(batch, eos_ids, eos_id, pad_id)
         save_npz(tokens_dir / f"example_{example_index:05d}.npz", batch)
-
-        grades = list(
-            graders.map(grade, (str(r) for r in batch["responses"]), repeat(row["reference"]))
-        )
-        n_correct += sum(g["correct"] for g in grades)
-        n_total += len(grades)
         n_truncated += int(batch["truncated"].sum())
-        chunk_seed = base_seed + (position // chunk_size) * chunk_size
-
-        for rollout_index, verdict in enumerate(grades):
-            append_jsonl(
-                traj_path,
-                {
-                    "example_index": example_index,
-                    "rollout_index": rollout_index,
-                    "id": row["id"],
-                    "prompt_length": int(batch["prompt_length"]),
-                    "response": str(batch["responses"][rollout_index]),
-                    "response_length": int(batch["response_lengths"][rollout_index]),
-                    "truncated": bool(batch["truncated"][rollout_index]),
-                    "finish_reason": str(batch["finish_reasons"][rollout_index]),
-                    "correct": bool(verdict["correct"]),
-                    "has_answer": bool(verdict["has_answer"]),
-                    "has_boxed": bool(verdict["has_boxed"]),
-                    "seed": chunk_seed,
-                },
-            )
+        pending_grades.append((
+            position, row, batch,
+            graders.map(grade, [str(r) for r in batch["responses"]], repeat(row["reference"])),
+        ))
+    drain()
 
     wall = time.monotonic() - started
     accuracy = n_correct / n_total if n_total else 0.0
