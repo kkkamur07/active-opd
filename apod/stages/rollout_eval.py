@@ -1,8 +1,12 @@
 """Rollout + eval stage: one vLLM engine session per (arm, round, shard).
 
-Runs the MATH-500 eval of the round's starting model FIRST, then the round's
-rollouts from that same engine (skipped with ``--eval-only`` for the final
-eval-only round). Written against ``docs/pipeline.md``; loads
+Runs the MATH-500 eval of the round's starting model and the round's rollouts
+from that same engine as ONE generate stream: eval requests first, then
+rollouts (skipped with ``--eval-only`` for the final eval-only round), packed
+into ``target_concurrent_sequences``-sized chunks that may hold both, so the
+engine never drains at the eval->rollout boundary. Eval and rollout rows still
+land in their own files and their own done-markers (``run_session``). Written
+against ``docs/pipeline.md``; loads
 ``<run-dir>/resolved_config.yaml`` with ``OmegaConf.load`` (stages are plain
 scripts, not Hydra apps). The driver launches one process per shard with
 ``CUDA_VISIBLE_DEVICES`` set to that shard's GPU. ``--eval-dataset <name>``
@@ -14,11 +18,11 @@ Seeds:
               ``seed + eval_seed_offset + round * num_problems + problem_index``
               so re-runs of a round reproduce and rounds differ, independent of
               sharding and resume state.
-  rollouts -- base ``seed + round * num_prompts`` handed to
-              ``generate_trajectories_vllm``, which derives ``base + chunk_start``
-              per chunk; the per-row ``seed`` field records that chunk seed.
-              With 8 rounds x 128 prompts the rollout seeds stay far below
-              ``eval_seed_offset``, so the two streams never collide.
+  rollouts -- base ``seed + round * num_prompts``, plus ``chunk_start`` of
+              the prompt's chunk at the rollout-only chunk size
+              (``RolloutWriter.seed``); the per-row ``seed`` field records that
+              chunk seed. With 8 rounds x 128 prompts the rollout seeds stay
+              far below ``eval_seed_offset``, so the two streams never collide.
 
 Token storage: TRL's GKD trainer feeds the stored token ids to the student
 verbatim, so every non-truncated row must end with an EOS the model actually
@@ -47,8 +51,8 @@ from omegaconf import OmegaConf
 
 from apod import paths
 from apod.datasets import append_jsonl, read_jsonl, save_npz, write_jsonl
-from apod.models import build_llm, generate_trajectories_vllm, render_prompt
-from apod.models.generate_vllm import build_sampling_params
+from apod.models import build_llm, render_prompt
+from apod.models.generate_vllm import build_sampling_params, generate_requests_vllm, pack_batch
 from apod.stages.common import parse_stage_args, stage_parser
 from apod.verification import grade
 
@@ -277,46 +281,71 @@ def _sampling_kwargs(cfg) -> dict[str, Any]:
     }
 
 
-def run_eval(
-    llm, tokenizer, cfg, args, eval_dir: Path, pending, memory: GpuMemoryProbe, graders
-) -> None:
-    eval_path = eval_dir / f"eval.shard{args.shard}.jsonl"
-    num_samples = int(cfg.eval.num_samples)
-    chunk_size = max(1, int(cfg.engine.target_concurrent_sequences) // num_samples)
-    seed_base = int(cfg.seed) + int(cfg.eval.eval_seed_offset) + args.round_index * int(cfg.eval.num_problems)
-    sampling = _sampling_kwargs(cfg)
+class EvalWriter:
+    """The eval half of one engine session.
 
-    started = time.monotonic()
-    generate_seconds = 0.0
-    generated_tokens = 0
-    n_correct = 0
-    n_total = 0
-    n_truncated = 0
-    response_tokens = 0
+    Builds the requests for the pending problems, appends their rows to
+    ``eval.shard{K}.jsonl`` as their grades come back, and touches the
+    done-marker once the LAST problem is graded -- never earlier, even when
+    rollout requests of the same session are still in flight.
+    """
 
-    # Grading of chunk k runs in the worker processes WHILE chunk k+1
-    # generates; its rows are written and its progress line printed once that
-    # generate returns. Executor.map submits every item immediately and only
-    # blocks when its iterator is consumed, so the map iterator is the chunk's
-    # batch of futures. The requests (texts, per-problem seeds, n) are built
-    # exactly as before -- only when the verdicts are consumed moves. The
-    # price is one chunk of durability: a crash during chunk k+1's generate
-    # also loses chunk k's unwritten rows, which row-level resume regenerates.
-    pending_grades: list[tuple[int, list, Any, float]] = []
+    def __init__(self, cfg, args, eval_dir: Path, pending, marker: Path) -> None:
+        self.cfg = cfg
+        self.pending = pending
+        self.path = eval_dir / f"eval.shard{args.shard}.jsonl"
+        self.marker = marker
+        self.num_samples = int(cfg.eval.num_samples)
+        self.seed_base = (
+            int(cfg.seed) + int(cfg.eval.eval_seed_offset) + args.round_index * int(cfg.eval.num_problems)
+        )
+        # (flat completions, verdict futures) per taken problem; consumed by
+        # drain() after the NEXT chunk's generate returns (see run_session).
+        self.grades: list[tuple[list, Any]] = []
+        self.done = 0
+        self.n_correct = 0
+        self.n_total = 0
+        self.n_truncated = 0
+        self.response_tokens = 0
+        self.finished = False
 
-    def drain() -> None:
-        nonlocal generate_seconds, generated_tokens, n_correct, n_total, n_truncated, response_tokens
-        for done, flat, verdicts, seconds in pending_grades:
-            chunk_tokens = 0
+    def requests(self, tokenizer) -> list[tuple[str, Any]]:
+        sampling = _sampling_kwargs(self.cfg)
+        return [
+            (
+                render_prompt(tokenizer, ex["prompt"], enable_thinking=bool(self.cfg.model.enable_thinking)),
+                build_sampling_params(
+                    n=self.num_samples,
+                    # Per (round, problem), independent of sharding and resume.
+                    seed=self.seed_base + problem_index,
+                    fast_presence_penalty=bool(self.cfg.sampling.fast_presence_penalty),
+                    **sampling,
+                ),
+            )
+            for problem_index, ex in self.pending
+        ]
+
+    def take(self, index: int, request_output, graders) -> None:
+        problem_index, example = self.pending[index]
+        flat = [
+            (problem_index, example, sample_index, completion)
+            for sample_index, completion in enumerate(request_output.outputs)
+        ]
+        # Math-verify is CPU-bound sympy with signal-based timeouts, so
+        # processes, not threads; map submits every item immediately.
+        verdicts = graders.map(grade, [str(c.text) for _, _, _, c in flat], repeat(example["answer"]))
+        self.grades.append((flat, verdicts))
+
+    def drain(self) -> None:
+        for flat, verdicts in self.grades:
             for (problem_index, example, sample_index, completion), verdict in zip(flat, verdicts):
                 truncated = completion.finish_reason == "length"
-                chunk_tokens += len(completion.token_ids)
-                response_tokens += len(completion.token_ids)
-                n_correct += int(verdict["correct"])
-                n_total += 1
-                n_truncated += int(truncated)
+                self.response_tokens += len(completion.token_ids)
+                self.n_correct += int(verdict["correct"])
+                self.n_total += 1
+                self.n_truncated += int(truncated)
                 append_jsonl(
-                    eval_path,
+                    self.path,
                     {
                         "problem_index": problem_index,
                         "sample_index": sample_index,
@@ -332,112 +361,104 @@ def run_eval(
                         "gold_parsed": bool(verdict["gold_parsed"]),
                     },
                 )
-            generate_seconds += seconds
-            generated_tokens += chunk_tokens
-            wall = time.monotonic() - started
-            eta = (wall / done) * (len(pending) - done) if done else 0.0
+            self.done += 1
+        self.grades.clear()
+        if self.done == len(self.pending) and not self.finished:
+            self.finished = True
+            accuracy = self.n_correct / self.n_total if self.n_total else 0.0
+            mean_length = self.response_tokens / self.n_total if self.n_total else 0.0
             print(
-                f"eval  problems {done}/{len(pending)}  {seconds:.1f}s  "
-                f"gen {chunk_tokens / seconds if seconds else 0.0:.0f} tok/s "
-                f"(run {generated_tokens / generate_seconds if generate_seconds else 0.0:.0f})  "
-                f"correct {n_correct}/{n_total}  truncated {n_truncated}  "
-                f"elapsed {format_duration(wall)}  eta {format_duration(eta)}",
+                f"eval done: {len(self.pending)} problems  correct {self.n_correct}/{self.n_total} "
+                f"({accuracy:.3f})  truncated {self.n_truncated}  mean {mean_length:.0f} tok/sample",
                 flush=True,
             )
-        pending_grades.clear()
+            self.marker.touch()
 
-    for chunk_start in range(0, len(pending), chunk_size):
-        chunk = pending[chunk_start : chunk_start + chunk_size]
-        texts = [
-            render_prompt(tokenizer, ex["prompt"], enable_thinking=bool(cfg.model.enable_thinking))
-            for _, ex in chunk
-        ]
-        params = [
-            build_sampling_params(
-                n=num_samples,
-                # Per (round, problem), independent of sharding and resume.
-                seed=seed_base + problem_index,
-                fast_presence_penalty=bool(cfg.sampling.fast_presence_penalty),
-                **sampling,
-            )
-            for problem_index, _ in chunk
-        ]
-        began = time.perf_counter()
-        outputs = llm.generate(texts, params)
-        seconds = time.perf_counter() - began
-        memory.sample()
-
-        # Grade the whole chunk in worker processes (math-verify is CPU-bound
-        # sympy with signal-based timeouts, so processes, not threads).
-        flat = [
-            (problem_index, example, sample_index, completion)
-            for (problem_index, example), request_output in zip(chunk, outputs)
-            for sample_index, completion in enumerate(request_output.outputs)
-        ]
-        verdicts = graders.map(
-            grade,
-            [str(c.text) for _, _, _, c in flat],
-            [ex["answer"] for _, ex, _, _ in flat],
+    def progress(self) -> str:
+        return (
+            f"eval {self.done}/{len(self.pending)}  correct {self.n_correct}/{self.n_total}  "
+            f"truncated {self.n_truncated}"
         )
-        drain()  # the previous chunk: graded while this one generated
-        pending_grades.append((min(chunk_start + chunk_size, len(pending)), flat, verdicts, seconds))
-    drain()
-
-    wall = time.monotonic() - started
-    accuracy = n_correct / n_total if n_total else 0.0
-    mean_length = response_tokens / n_total if n_total else 0.0
-    print(
-        f"eval done: {len(pending)} problems  correct {n_correct}/{n_total} ({accuracy:.3f})  "
-        f"truncated {n_truncated}  mean {mean_length:.0f} tok/sample  "
-        f"{generated_tokens / generate_seconds if generate_seconds else 0.0:.0f} gen tok/s over "
-        f"{format_duration(generate_seconds)} of generate ({format_duration(wall)} wall)",
-        flush=True,
-    )
 
 
-def run_rollouts(
-    llm, tokenizer, cfg, args, rollouts_dir: Path, pending, model_path: str,
-    memory: GpuMemoryProbe, graders,
-) -> None:
-    traj_path = rollouts_dir / f"trajectories.shard{args.shard}.jsonl"
-    tokens_dir = rollouts_dir / "tokens"
-    num_rollouts = int(cfg.rollout.num_rollouts)
-    chunk_size = max(1, int(cfg.engine.target_concurrent_sequences) // num_rollouts)
-    # Round-offset base; generate_trajectories_vllm derives base + chunk_start
-    # per chunk, so the whole run stays below eval_seed_offset.
-    base_seed = int(cfg.seed) + args.round_index * int(cfg.rollout.num_prompts)
+class RolloutWriter:
+    """The rollout half of one engine session.
 
-    eos_ids = collect_eos_ids(tokenizer, model_path)
-    eos_id = int(tokenizer.eos_token_id)
-    pad_id = tokenizer.pad_token_id
-    if pad_id is None:
-        pad_id = eos_id
+    Builds the requests for the pending prompts, writes each prompt's npz
+    (after EOS repair) the moment its outputs land, appends the graded rows
+    to ``trajectories.shard{K}.jsonl``, and touches the done-marker once the
+    LAST prompt is graded.
+    """
 
-    started = time.monotonic()
-    n_correct = 0
-    n_total = 0
-    n_truncated = 0
-    n_repaired = 0
-    throughput: dict[str, Any] = {}
+    def __init__(
+        self, cfg, args, rollouts_dir: Path, pending, marker: Path, model_path: str, tokenizer
+    ) -> None:
+        self.cfg = cfg
+        self.pending = pending
+        self.path = rollouts_dir / f"trajectories.shard{args.shard}.jsonl"
+        self.tokens_dir = rollouts_dir / "tokens"
+        self.marker = marker
+        self.num_rollouts = int(cfg.rollout.num_rollouts)
+        # Seeds are per chunk of the pending list at the rollout-only chunk
+        # size (target_concurrent_sequences // num_rollouts), exactly what
+        # generate_trajectories_vllm derived when rollouts ran as their own
+        # generate stream, so sharing chunks with eval requests changes no
+        # SamplingParams; the per-row ``seed`` field records that chunk seed.
+        self.chunk_size = max(1, int(cfg.engine.target_concurrent_sequences) // self.num_rollouts)
+        self.base_seed = int(cfg.seed) + args.round_index * int(cfg.rollout.num_prompts)
+        self.eos_ids = collect_eos_ids(tokenizer, model_path)
+        self.eos_id = int(tokenizer.eos_token_id)
+        self.pad_id = tokenizer.pad_token_id
+        if self.pad_id is None:
+            self.pad_id = self.eos_id
+        # (position, row, batch, verdict futures) per taken prompt; the npz
+        # is already on disk, only the jsonl rows wait for drain().
+        self.grades: list[tuple[int, dict[str, Any], dict[str, Any], Any]] = []
+        self.done = 0
+        self.n_correct = 0
+        self.n_total = 0
+        self.n_truncated = 0
+        self.n_repaired = 0
+        self.finished = False
 
-    # Same overlap as run_eval: a prompt's grades are submitted as soon as its
-    # batch is packed and consumed when the NEXT chunk's generate returns
-    # (on_chunk fires right after it), so grading never idles the engine.
-    # The npz is still written immediately; only the jsonl rows wait, so a
-    # crash during the next generate costs one chunk of rows, which row-level
-    # resume regenerates (overwriting that chunk's npz files).
-    pending_grades: list[tuple[int, dict[str, Any], dict[str, Any], Any]] = []
+    def seed(self, position: int) -> int:
+        return self.base_seed + (position // self.chunk_size) * self.chunk_size
 
-    def drain() -> None:
-        nonlocal n_correct, n_total
-        for position, row, batch, verdicts in pending_grades:
+    def requests(self, tokenizer) -> list[tuple[str, Any]]:
+        sampling = _sampling_kwargs(self.cfg)
+        return [
+            (
+                render_prompt(tokenizer, row["prompt"], enable_thinking=bool(self.cfg.model.enable_thinking)),
+                build_sampling_params(
+                    n=self.num_rollouts,
+                    seed=self.seed(position),
+                    fast_presence_penalty=bool(self.cfg.sampling.fast_presence_penalty),
+                    **sampling,
+                ),
+            )
+            for position, row in enumerate(self.pending)
+        ]
+
+    def take(self, position: int, request_output, graders) -> None:
+        row = self.pending[position]
+        example_index = int(row["example_index"])
+        batch = pack_batch(request_output, row["prompt"], self.pad_id)
+        # Repair BEFORE the npz and the jsonl rows so the stored lengths, the
+        # stored ids, and what the trainer feeds are one and the same thing.
+        self.n_repaired += ensure_trailing_eos(batch, self.eos_ids, self.eos_id, self.pad_id)
+        save_npz(self.tokens_dir / f"example_{example_index:05d}.npz", batch)
+        self.n_truncated += int(batch["truncated"].sum())
+        verdicts = graders.map(grade, [str(r) for r in batch["responses"]], repeat(row["reference"]))
+        self.grades.append((position, row, batch, verdicts))
+
+    def drain(self) -> None:
+        for position, row, batch, verdicts in self.grades:
             grades = list(verdicts)
-            n_correct += sum(g["correct"] for g in grades)
-            n_total += len(grades)
-            chunk_seed = base_seed + (position // chunk_size) * chunk_size
+            self.n_correct += sum(g["correct"] for g in grades)
+            self.n_total += len(grades)
             for rollout_index, verdict in enumerate(grades):
                 append_jsonl(
-                    traj_path,
+                    self.path,
                     {
                         "example_index": int(row["example_index"]),
                         "rollout_index": rollout_index,
@@ -450,71 +471,90 @@ def run_rollouts(
                         "correct": bool(verdict["correct"]),
                         "has_answer": bool(verdict["has_answer"]),
                         "has_boxed": bool(verdict["has_boxed"]),
-                        "seed": chunk_seed,
+                        "seed": self.seed(position),
                     },
                 )
-        pending_grades.clear()
+            self.done += 1
+        self.grades.clear()
+        if self.done == len(self.pending) and not self.finished:
+            self.finished = True
+            accuracy = self.n_correct / self.n_total if self.n_total else 0.0
+            print(
+                f"rollouts done: {len(self.pending)} prompts x {self.num_rollouts}  "
+                f"correct {self.n_correct}/{self.n_total} ({accuracy:.3f})  "
+                f"truncated {self.n_truncated}  eos repaired {self.n_repaired}",
+                flush=True,
+            )
+            self.marker.touch()
 
-    def on_chunk(metrics: dict[str, Any]) -> None:
-        drain()  # the previous chunk's grades finished during this generate
-        throughput.update(metrics["cumulative"])
+    def progress(self) -> str:
+        return (
+            f"rollouts {self.done}/{len(self.pending)}  correct {self.n_correct}/{self.n_total}  "
+            f"truncated {self.n_truncated}"
+        )
+
+
+def run_session(llm, tokenizer, cfg, writers, graders, memory: GpuMemoryProbe) -> None:
+    """One generate stream for every writer's requests, writers in order.
+
+    Eval problems and rollout prompts are packed into the same
+    ``target_concurrent_sequences``-sized chunks, so the chunk at the
+    eval->rollout boundary holds both and the engine never drains between
+    the two. Requests are identical to two separate streams (texts,
+    per-request SamplingParams and seeds); only their grouping into
+    ``llm.generate`` calls changes.
+
+    Grading overlaps generation: a chunk's grades are submitted the moment
+    its generate returns (take) and consumed after the NEXT generate returns
+    (drain), so the engine never idles for Math-Verify. The price is one
+    chunk of durability: a crash during chunk k+1's generate loses chunk k's
+    unwritten rows, which row-level resume regenerates.
+    """
+
+    requests: list[tuple[str, Any, Any, int]] = []  # (text, params, writer, key)
+    for writer in writers:
+        for key, (text, params) in enumerate(writer.requests(tokenizer)):
+            requests.append((text, params, writer, key))
+    total_sequences = sum(int(params.n) for _, params, _, _ in requests)
+    chunks = generate_requests_vllm(
+        llm,
+        [(text, params) for text, params, _, _ in requests],
+        chunk_budget=int(cfg.engine.target_concurrent_sequences),
+    )
+    started = time.monotonic()
+    throughput: dict[str, Any] = {}
+    for start, outputs, metrics in chunks:
         memory.sample()
-        cumulative = metrics["cumulative"]
-        done = cumulative["prompts"]
+        for writer in writers:
+            writer.drain()  # the previous chunk: graded while this one generated
+        for offset, request_output in enumerate(outputs):
+            _, _, writer, key = requests[start + offset]
+            writer.take(key, request_output, graders)
+        throughput = metrics["cumulative"]
         wall = time.monotonic() - started
-        eta = (wall / done) * (len(pending) - done) if done else 0.0
+        done = throughput["sequences"]
+        eta = (wall / done) * (total_sequences - done) if done else 0.0
         print(
-            f"rollouts  chunk {metrics['chunk_index']}  prompts {done}/{len(pending)}  "
-            f"{metrics['seconds']:.1f}s  "
+            f"generate  chunk {metrics['chunk_index']}  "
+            + "  |  ".join(writer.progress() for writer in writers)
+            + f"  |  {metrics['seconds']:.1f}s  "
             f"gen {metrics['generated_tokens_per_s']:.0f} tok/s "
-            f"(run {cumulative['generated_tokens_per_s']:.0f})  "
+            f"(run {throughput['generated_tokens_per_s']:.0f})  "
             f"total {metrics['total_tokens_per_s']:.0f} tok/s  "
             f"seq {metrics['sequences_per_s']:.2f}/s  "
-            f"mean {metrics['mean_generated_tokens_per_sequence']:.0f} tok/trace  "
+            f"mean {metrics['mean_generated_tokens_per_sequence']:.0f} tok/seq  "
             f"elapsed {format_duration(wall)}  eta {format_duration(eta)}",
             flush=True,
         )
-
-    batches = generate_trajectories_vllm(
-        llm,
-        tokenizer,
-        [row["prompt"] for row in pending],
-        n=num_rollouts,
-        chunk_size=chunk_size,
-        seed=base_seed,
-        enable_thinking=bool(cfg.model.enable_thinking),
-        on_chunk=on_chunk,
-        **_sampling_kwargs(cfg),
-    )
-
-    for position, batch in batches:
-        row = pending[position]
-        example_index = int(row["example_index"])
-        # Repair BEFORE the npz and the jsonl rows so the stored lengths, the
-        # stored ids, and what the trainer feeds are one and the same thing.
-        n_repaired += ensure_trailing_eos(batch, eos_ids, eos_id, pad_id)
-        save_npz(tokens_dir / f"example_{example_index:05d}.npz", batch)
-        n_truncated += int(batch["truncated"].sum())
-        pending_grades.append((
-            position, row, batch,
-            graders.map(grade, [str(r) for r in batch["responses"]], repeat(row["reference"])),
-        ))
-    drain()
-
-    wall = time.monotonic() - started
-    accuracy = n_correct / n_total if n_total else 0.0
-    print(
-        f"rollouts done: {len(pending)} prompts x {num_rollouts}  "
-        f"correct {n_correct}/{n_total} ({accuracy:.3f})  truncated {n_truncated}  "
-        f"eos repaired {n_repaired}",
-        flush=True,
-    )
+    for writer in writers:
+        writer.drain()
     if throughput:
         print(
-            f"rollout throughput: {throughput['generated_tokens_per_s']:.0f} generated tok/s  "
+            f"generate throughput: {throughput['generated_tokens_per_s']:.0f} generated tok/s  "
             f"{throughput['total_tokens_per_s']:.0f} total tok/s  "
             f"{throughput['sequences_per_s']:.2f} seq/s over "
-            f"{format_duration(throughput['seconds'])} of generate ({format_duration(wall)} wall)",
+            f"{format_duration(throughput['seconds'])} of generate "
+            f"({format_duration(time.monotonic() - started)} wall)",
             flush=True,
         )
 
@@ -602,14 +642,14 @@ def main(argv: list[str] | None = None) -> int:
             and not bool(cfg.sampling.fast_presence_penalty)
             and rollout_pending
         ):
-            # generate_trajectories_vllm routes a nonzero penalty through
+            # build_sampling_params routes a nonzero penalty through
             # extra_args; an engine built without the processor would silently
             # generate unpenalised rollouts. With penalty 0.0 there is nothing
             # to apply and no processor is needed.
             raise RuntimeError(
                 "a nonzero presence_penalty requires "
                 "sampling.fast_presence_penalty=true "
-                "(generate_trajectories_vllm has no native-penalty path)"
+                "(build_sampling_params has no native-penalty path)"
             )
         print(
             f"pending: {len(eval_pending)} eval problems ({len(eval_done)} done), "
@@ -636,20 +676,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         tokenizer = llm.get_tokenizer()
 
+        # Eval requests go first in the stream; a resumed round whose eval is
+        # complete submits rollouts only and never regenerates eval rows.
+        writers: list[Any] = []
         if eval_pending:
-            run_eval(llm, tokenizer, cfg, args, eval_dir, eval_pending, memory, graders)
+            writers.append(EvalWriter(cfg, args, eval_dir, eval_pending, eval_marker))
         else:
             print("eval: nothing pending", flush=True)
-        eval_marker.touch()
-
-        if not args.eval_only:
-            if rollout_pending:
-                run_rollouts(
-                    llm, tokenizer, cfg, args, rollouts_dir, rollout_pending, model_path,
-                    memory, graders,
-                )
-            else:
-                print("rollouts: nothing pending", flush=True)
+            eval_marker.touch()
+        if rollout_pending:
+            writers.append(
+                RolloutWriter(cfg, args, rollouts_dir, rollout_pending, rollout_marker, model_path, tokenizer)
+            )
+        run_session(llm, tokenizer, cfg, writers, graders, memory)
+        if not args.eval_only and not rollout_pending:
+            print("rollouts: nothing pending", flush=True)
             rollout_marker.touch()
         graders.shutdown()
 

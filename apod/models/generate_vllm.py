@@ -330,7 +330,7 @@ def build_sampling_params(
     )
 
 
-def _pack(request_output, prompt: str, pad_id: int) -> dict[str, Any]:
+def pack_batch(request_output, prompt: str, pad_id: int) -> dict[str, Any]:
     """One RequestOutput (n completions, shared prompt) -> the save_npz dict."""
 
     prompt_ids = list(request_output.prompt_token_ids)
@@ -444,6 +444,58 @@ def _rates(
     return metrics
 
 
+def generate_requests_vllm(
+    llm,
+    requests: Sequence[tuple[str, Any]],
+    *,
+    chunk_budget: int,
+) -> Iterator[tuple[int, list, dict[str, Any]]]:
+    """Run ``(rendered text, SamplingParams)`` requests in submission order.
+
+    Requests are packed front-to-back into ``llm.generate`` calls that hold at
+    most ``chunk_budget`` concurrent sequences (the sum of each request's
+    ``n``; a request that alone exceeds the budget still runs, by itself).
+    Chunking rather than one call for everything keeps the per-chunk crash
+    durability of the stages -- a dying run keeps the chunks it finished --
+    while letting requests of different kinds (eval problems, rollout
+    prompts) share a chunk, so the engine never drains between them.
+
+    Yields ``(start, outputs, metrics)`` per chunk: the index of the chunk's
+    first request, its RequestOutputs in request order, and the chunk's
+    throughput metrics with a ``cumulative`` entry for the run so far. The
+    clock covers only ``llm.generate``.
+    """
+
+    meter = _ThroughputMeter()
+    start = 0
+    while start < len(requests):
+        stop = start + 1
+        sequences = int(requests[start][1].n)
+        while stop < len(requests) and sequences + int(requests[stop][1].n) <= chunk_budget:
+            sequences += int(requests[stop][1].n)
+            stop += 1
+        texts = [text for text, _ in requests[start:stop]]
+        params = [sampling for _, sampling in requests[start:stop]]
+        began = time.perf_counter()
+        outputs = llm.generate(texts, params)
+        seconds = time.perf_counter() - began
+
+        counts = _count_chunk_tokens(outputs)
+        meter.add(prompts=stop - start, seconds=seconds, counts=counts)
+        metrics = _rates(
+            seconds=seconds,
+            counts=counts,
+            extra={
+                "chunk_index": meter.chunks - 1,
+                "chunk_start": start,
+                "chunk_prompts": stop - start,
+            },
+        )
+        metrics["cumulative"] = meter.totals()
+        yield start, list(outputs), metrics
+        start = stop
+
+
 def generate_trajectories_vllm(
     llm,
     tokenizer,
@@ -488,11 +540,8 @@ def generate_trajectories_vllm(
     if pad_id is None:
         pad_id = tokenizer.eos_token_id
 
-    texts = [render_prompt(tokenizer, prompt, enable_thinking=enable_thinking) for prompt in prompts]
-    meter = _ThroughputMeter()
-
-    for start in range(0, len(texts), chunk_size):
-        stop = min(start + chunk_size, len(texts))
+    requests = []
+    for start in range(0, len(prompts), chunk_size):
         params = build_sampling_params(
             n=n,
             max_tokens=max_tokens,
@@ -504,26 +553,14 @@ def generate_trajectories_vllm(
             # every chunk sample the identical stream.
             seed=None if seed is None else seed + start,
         )
-        began = time.perf_counter()
-        outputs = llm.generate(texts[start:stop], params)
-        seconds = time.perf_counter() - began
+        for prompt in prompts[start : start + chunk_size]:
+            requests.append((render_prompt(tokenizer, prompt, enable_thinking=enable_thinking), params))
 
-        counts = _count_chunk_tokens(outputs)
-        meter.add(prompts=stop - start, seconds=seconds, counts=counts)
-        metrics = _rates(
-            seconds=seconds,
-            counts=counts,
-            extra={
-                "chunk_index": meter.chunks - 1,
-                "chunk_start": start,
-                "chunk_prompts": stop - start,
-            },
-        )
-        metrics["cumulative"] = meter.totals()
+    # Budget chunk_size * n reproduces the chunk_size grouping exactly.
+    for start, outputs, metrics in generate_requests_vllm(llm, requests, chunk_budget=chunk_size * n):
         if on_chunk is not None:
             on_chunk(metrics)
-
         for offset, request_output in enumerate(outputs):
-            batch = _pack(request_output, prompts[start + offset], pad_id)
+            batch = pack_batch(request_output, prompts[start + offset], pad_id)
             batch["throughput"] = metrics
             yield start + offset, batch
