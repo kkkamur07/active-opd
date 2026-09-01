@@ -752,7 +752,14 @@ class Driver:
             )
         )
         if tracking is not None:
-            tracking.log_refresh(row["step"], row)
+            # Open the arm's W&B run only for this log call: a run id can be
+            # live in one process at a time ("run ID ... is in use"), and the
+            # train stage resumes the same id in its own process in between.
+            tracking.init(self.cfg, self.run_dir, row["arm"])
+            try:
+                tracking.log_refresh(row["step"], row)
+            finally:
+                tracking.finish()
         return row
 
     # --- whole run -------------------------------------------------------------
@@ -768,14 +775,8 @@ class Driver:
         for arm in self.arms:
             questions = self.write_questions(arm)
             self.point_pool_at(arm)
-            if tracking is not None:
-                tracking.init(self.cfg, self.run_dir, arm)
-            try:
-                for refresh in range(b.refreshes + 1):
-                    self.run_refresh(arm, refresh, questions)
-            finally:
-                if tracking is not None:
-                    tracking.finish()
+            for refresh in range(b.refreshes + 1):
+                self.run_refresh(arm, refresh, questions)
         _log("all arms complete; rendering plots")
         from apod.plotting import plot_refresh_curves  # matplotlib Agg, no GPU
 
