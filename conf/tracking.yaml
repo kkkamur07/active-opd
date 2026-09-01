@@ -1,0 +1,19 @@
+# @package tracking
+# Weights & Biases tracking (apod/tracking.py). One W&B run per arm:
+#   group    = run dir name            e.g. r1-correctness-8k
+#   name     = <run dir name>/<arm>    e.g. r1-correctness-8k/teacher_right_student_wrong
+#   job_type = arm
+#   tags     = [cap<sampling.max_new_tokens>, experiment]
+#   id       = deterministic from (run dir name, arm), so the driver's refresh
+#              evals and every train-stage launch resume the SAME run
+# x-axis of every scalar is global_step (training steps across refreshes).
+mode: offline        # online | offline | disabled. Offline never blocks on
+                     # the network; upload later with
+                     #   wandb sync <run_dir>/wandb/offline-run-*
+                     # (all offline-run dirs of an arm share its run id).
+                     # disabled (or wandb not installed) -> every call is a no-op.
+project: apod
+entity: null         # W&B team/user; null -> the logged-in default
+experiment: null     # second tag; null -> the run dir name
+dir: null            # wandb writes <dir>/wandb/; null -> <run_dir> (so runs
+                     # sit in <run_dir>/wandb/offline-run-*-<id>)

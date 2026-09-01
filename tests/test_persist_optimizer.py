@@ -26,7 +26,11 @@ import torch
 from datasets import Dataset
 from transformers import Qwen2Config, Qwen2ForCausalLM, Trainer, TrainingArguments
 
-from apod.stages.train import _optimizer_param_names, _restore_optimizer_state
+from apod.stages.train import ContinuedSchedule, _optimizer_param_names, _restore_optimizer_state
+
+
+class ContinuedTrainer(ContinuedSchedule, Trainer):
+    """Plain Trainer + the schedule-continuation mixin DiagGKDTrainer uses."""
 
 LR = 1e-3
 MIN_LR_RATE = 0.1
@@ -246,7 +250,7 @@ def _dataset() -> Dataset:
     return Dataset.from_dict({"input_ids": ids, "labels": ids})
 
 
-def _args(out: Path, max_steps: int, sched: str, warmup: int) -> TrainingArguments:
+def _args(out: Path, max_steps: int, sched: str, warmup: float) -> TrainingArguments:
     return TrainingArguments(
         output_dir=str(out), max_steps=max_steps, per_device_train_batch_size=1,
         learning_rate=LR, lr_scheduler_type=sched, warmup_steps=warmup,
@@ -260,13 +264,18 @@ def _lrs(trainer: Trainer) -> list[float]:
     return [e["learning_rate"] for e in trainer.state.log_history if "learning_rate" in e]
 
 
-def _train_split(tmp: Path, sched: str, warmup: int, first: int, second: int):
+def _train_split(tmp: Path, sched: str, warmup: float, first: int, second: int, total: int | None = None):
     """Pass 0: fresh trainer, ``first`` steps, save weights + optimizer dump
     exactly like train.py. Pass 1: reload weights, ``create_optimizer()``,
     ``_restore_optimizer_state`` on the inner optimizer, train ``second``.
+    With ``total`` set, both passes use ContinuedTrainer (one schedule over
+    ``total`` steps, pass 1 advanced by ``first`` -- train.py's
+    train.total_training_steps + --global-step-offset).
     Returns (model after pass 1, lrs pass 0, lrs pass 1, steps after load)."""
-    tr0 = Trainer(model=tiny_model(), args=_args(tmp / "p0", first, sched, warmup),
-                  train_dataset=_dataset())
+    cls = ContinuedTrainer if total is not None else Trainer
+    tr0 = cls(model=tiny_model(), args=_args(tmp / "p0", first, sched, warmup),
+              train_dataset=_dataset())
+    tr0.total_training_steps, tr0.global_step_offset = total, 0
     tr0.train()
     unwrapped = tr0.accelerator.unwrap_model(tr0.model)
     inner = getattr(tr0.optimizer, "optimizer", tr0.optimizer)
@@ -275,8 +284,9 @@ def _train_split(tmp: Path, sched: str, warmup: int, first: int, second: int):
     unwrapped.save_pretrained(ckpt)
     saved = dump(inner, unwrapped, ckpt / "optimizer_state.pt")
 
-    tr1 = Trainer(model=Qwen2ForCausalLM.from_pretrained(ckpt),
-                  args=_args(tmp / "p1", second, sched, warmup), train_dataset=_dataset())
+    tr1 = cls(model=Qwen2ForCausalLM.from_pretrained(ckpt),
+              args=_args(tmp / "p1", second, sched, warmup), train_dataset=_dataset())
+    tr1.total_training_steps, tr1.global_step_offset = total, first
     tr1.create_optimizer()  # idempotent; train() reuses it (transformers 5.15 _prepare_for_training)
     inner1 = getattr(tr1.optimizer, "optimizer", tr1.optimizer)
     assert _restore_optimizer_state(inner1, tr1.model, saved) == len(saved["names"])
@@ -288,9 +298,11 @@ def _train_split(tmp: Path, sched: str, warmup: int, first: int, second: int):
     return tr1.accelerator.unwrap_model(tr1.model), _lrs(tr0), _lrs(tr1), loaded_steps, final_steps
 
 
-def _train_continuous(tmp: Path, sched: str, warmup: int, n: int):
-    tr = Trainer(model=tiny_model(), args=_args(tmp / "cont", n, sched, warmup),
-                 train_dataset=_dataset())
+def _train_continuous(tmp: Path, sched: str, warmup: float, n: int, total: int | None = None):
+    cls = ContinuedTrainer if total is not None else Trainer
+    tr = cls(model=tiny_model(), args=_args(tmp / "cont", n, sched, warmup),
+             train_dataset=_dataset())
+    tr.total_training_steps, tr.global_step_offset = total, 0
     tr.train()
     return tr.accelerator.unwrap_model(tr.model), _lrs(tr)
 
@@ -348,6 +360,51 @@ def test_trainer_restarted_cosine_schedule(tmp_path: Path | None = None):
     assert diff > 1e-6, "restarted schedule should not reproduce the continuous run"
     print(f"restarted-schedule max |dw| vs continuous 4-step run: {diff:.3e} "
           f"(pass-1 lrs {lrs1} vs continuous tail {expected_cont_tail})")
+
+
+# --- (e) Trainer continuation with ONE schedule: 20 == 10 + save/load + 10 --
+
+
+def test_trainer_continued_cosine_schedule(tmp_path: Path | None = None):
+    """train.total_training_steps + --global-step-offset (ContinuedSchedule):
+    warmup 5% of 20 = 1 step, then cosine_with_min_lr 0.1 down to step 20,
+    built once per pass for the whole run and advanced past the steps the
+    earlier pass took. Same logged LR sequence and bit-exact weights as the
+    continuous 20-step run (the mismatch test (d) documents is gone)."""
+    tmp = tmp_path or Path(tempfile.mkdtemp())
+    sched, warm, total = "cosine_with_min_lr", 0.05, 20
+    warm_steps = math.ceil(warm * total)
+
+    def lam(step: int) -> float:  # transformers.optimization, min_lr_rate variant
+        if step < warm_steps:
+            return step / max(1, warm_steps)
+        progress = (step - warm_steps) / max(1, total - warm_steps)
+        return (0.5 * (1 + math.cos(math.pi * progress))) * (1 - MIN_LR_RATE) + MIN_LR_RATE
+
+    cont, lrs_cont = _train_continuous(tmp, sched, warm, total, total=total)
+    split, lrs0, lrs1, loaded, final = _train_split(tmp, sched, warm, 10, 10, total=total)
+
+    expected = [LR * lam(s) for s in range(total)]
+    assert all(abs(a - b) < 1e-15 for a, b in zip(lrs_cont, expected)) and len(lrs_cont) == total, lrs_cont
+    assert lrs0 == lrs_cont[:10], (lrs0, lrs_cont[:10])
+    assert lrs1 == lrs_cont[10:], f"pass 1 must continue the schedule at step 10: {lrs1} vs {lrs_cont[10:]}"
+    assert lrs1[0] < lrs0[-1] < LR, "pass 1 starts on the cosine tail, not at warmup 0 / peak"
+    assert loaded == {10.0} and final == {20.0}
+    diff = _max_param_diff(cont, split)
+    assert diff == 0.0, f"continued schedule must reproduce the continuous run bit-exactly: max |dw| = {diff}"
+    print(f"continued-schedule (warmup+cosine, 10+10 vs 20) max |dw| = {diff:.1e}; "
+          f"lrs pass 1 = {[round(x / LR, 4) for x in lrs1]} x peak")
+
+    # Overrunning the run's schedule fails loudly instead of extrapolating.
+    tr = ContinuedTrainer(model=tiny_model(), args=_args(tmp / "over", 11, sched, warm),
+                          train_dataset=_dataset())
+    tr.total_training_steps, tr.global_step_offset = total, 10
+    try:
+        tr.train()
+    except RuntimeError as exc:
+        assert "total_training_steps" in str(exc), exc
+    else:
+        raise AssertionError("offset 10 + 11 steps > total 20 must raise")
 
 
 if __name__ == "__main__":

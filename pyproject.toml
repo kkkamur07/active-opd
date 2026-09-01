@@ -26,8 +26,10 @@ dependencies = [
 # `vllm<=0.26.0`, so the current 0.27.1 would lock us out of trl[vllm] later.
 # Qwen3.5 has been supported since vLLM 0.17, so nothing is lost.
 vllm = ["vllm==0.26.0"]
-# Later training phase; pulls the vllm extra at the same ceiling.
-train = ["trl[vllm]==1.10.0"]
+# Later training phase; pulls the vllm extra at the same ceiling. wandb is
+# the W&B client behind apod/tracking.py (conf/tracking.yaml); every
+# tracking call is a no-op without it, so it lives here, not in the core set.
+train = ["trl[vllm]==1.10.0", "wandb>=0.19"]
 # Fused Triton kernels for Qwen3.5's Gated DeltaNet layers on the HF side
 # (train, oracle scoring, entropy). transformers binds the `fla` package at
 # import time when it is installed; pure-Python wheels, no nvcc, no torch or

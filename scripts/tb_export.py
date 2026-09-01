@@ -24,7 +24,24 @@ import argparse
 import json
 from pathlib import Path
 
-SCALARS = {"loss": "train/loss", "grad_norm": "train/grad_norm", "learning_rate": "train/lr"}
+SCALARS = {
+    "loss": "train/loss",
+    "grad_norm": "train/grad_norm",
+    "learning_rate": "train/lr",
+    # Per-step batch diagnostics written by apod.stages.train.DiagGKDTrainer
+    # (absent in log histories that predate them; exported when present).
+    "overlap_ratio_top16": "train/overlap_ratio_top16",
+    "overlap_adv_top16": "train/overlap_adv_top16",
+    "abs_entropy_gap": "train/abs_entropy_gap",
+    "response_tokens": "train/response_tokens",
+    "cap_hit_frac": "train/cap_hit_frac",
+    "bf16_rounded_frac": "train/bf16_rounded_frac",
+    "bf16_rounded_frac_embeddings": "train/bf16_rounded_frac_embeddings",
+    "bf16_rounded_frac_attention": "train/bf16_rounded_frac_attention",
+    "bf16_rounded_frac_mlp": "train/bf16_rounded_frac_mlp",
+    "bf16_rounded_frac_lm_head": "train/bf16_rounded_frac_lm_head",
+    "bf16_rounded_frac_other": "train/bf16_rounded_frac_other",
+}
 # Offline oracle scoring is per ROUND, not per step: one TB point per round,
 # at the round's starting cumulative step (same convention as eval/*).
 ORACLE_KEYS = ("mean_reverse_kl", "mean_forward_kl", "overlap_ratio_top16", "overlap_adv_top16")

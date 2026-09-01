@@ -3,6 +3,28 @@
 Dated decisions from planning sessions, one line each, newest first. Reasoning
 lives in the linked ADR or doc; vocabulary in CONTEXT.md.
 
+## 2026-09-01 train-stage decisions (evening, train.py branch)
+
+- **LR schedule continues across refreshes** ("it has to continue"): one
+  warmup + cosine_with_min_lr(0.1) schedule over the run's
+  `train.total_training_steps` (100), warmup 5% = 5 steps once at the start;
+  every train launch builds the scheduler for the total and advances it by
+  `--global-step-offset` (only the scheduler; Adam moments come from
+  persist_optimizer). Unset total = the old per-launch schedule.
+  tests/test_persist_optimizer.py (e): 10+10 == 20, bit-exact.
+- **Per-step bf16 rounding diagnostic** `bf16_rounded_frac` (+ per block):
+  fraction of parameter elements whose Adam update is below half a bf16 ulp
+  of the weight, from the post-step optimizer state. Pure-bf16 training at
+  peak lr 3.16e-6 is expected to lose most updates; the number says how many.
+- **Per-step batch diagnostics** (overlap ratio, overlap advantage,
+  |H_S - H_T|, response tokens, cap-hit fraction) computed inside the train
+  stage from the Liger loss's own hidden states (`train.diag_every`,
+  `diag_chunk`); logged to log_history, TensorBoard export and W&B.
+- **W&B tracking** (`apod/tracking.py`, `conf/tracking.yaml`): one run per
+  arm, offline by default, x-axis = global training step; `wandb sync` later.
+- **Atomic checkpoints**: the train stage saves into `checkpoint.tmp` and
+  renames, so a crash mid-save can never leave a loadable partial checkpoint.
+
 ## 2026-09-01 planning session (post 1 Sept meeting)
 
 - **Diversity: no arm, no monitor.** Not separate from distributional similarity (reverse KL) and entropy; covered by those signals and by pass@k in eval.

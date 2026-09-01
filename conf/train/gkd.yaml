@@ -15,7 +15,17 @@ lmbda: 0.0               # per-step Bernoulli(p) of in-trainer generation;
 # --- optimization (fresh trainer per round, checkpoint-to-checkpoint) ---
 learning_rate: 2.0e-5    # full-finetune scale (tinker's 1e-4 is LoRA-scale)
 lr_scheduler_type: constant
-warmup_steps: 0
+warmup_steps: 0          # warmup at the start of the WHOLE run (>= 1: steps;
+                         # < 1: fraction of the schedule length, e.g. 0.05 ->
+                         # 5 of total_training_steps 100)
+total_training_steps: null   # int: ONE LR schedule over the whole run --
+                         # every train-stage launch builds warmup+decay for
+                         # this many steps and advances it by the launch's
+                         # --global-step-offset (steps already taken; the
+                         # driver passes it) before its first step; only the
+                         # scheduler is advanced, never the optimizer. The
+                         # launch fails if offset + pass steps > total. null:
+                         # the schedule restarts every launch (old behaviour)
 num_train_epochs: 1
 per_device_train_batch_size: 8   # PER RANK; kl50/kl50w value (micro probe 2026-08-31 at cap 8192: 71.5 GiB peak). At cap 16384 only 2 fits (apod run: micro-4 59.2 GiB at 8192, superlinear); scripts/bucket_experiment.py sets 2 x 8 there.
 gradient_accumulation_steps: 2   # 2 DDP ranks x 8 x 2 = effective batch 32 (kl50/kl50w, 2026-08-31/09-01). USER DECISION 2026-08-15: eff 32, raised from 16 for stability (smoke3 at 4 oscillated, smoke8k at 16 degraded gently). Top-4 arms: 512/32 = 16 steps/round; 136 prompts: 17.
@@ -53,3 +63,20 @@ seed: ${seed}
 train_gpu: 0             # fallback GPU when num_gpus == 1; with num_gpus > 1
                          # the driver launches torchrun DDP across all GPUs
                          # (student + frozen teacher replicated per rank)
+
+# --- per-step diagnostics on the training batch (docs/decisions.md 2026-09-01)
+# Logged with loss/grad_norm/lr into train/log_history.jsonl (and W&B):
+# overlap_ratio_top16, overlap_adv_top16 (Rethinking OPD Eq. 6-7, exactly as
+# scripts/oracle_kl.py), abs_entropy_gap (mean |H_S - H_T| per response
+# token), response_tokens, cap_hit_frac. Computed in no_grad by a chunked
+# lm_head pass over the SAME hidden states the Liger fused loss consumes;
+# never touches the loss or the optimizer trajectory. Also every step, from
+# the Adam state after the update: bf16_rounded_frac (+ per block), the
+# fraction of parameter elements whose update is below half a bf16 ulp of
+# the weight and so is lost (pure-bf16 training, no fp32 master weights).
+diag_every: 1            # compute the three distribution diagnostics every N
+                         # optimizer steps (tokens + cap-hit are always logged);
+                         # 0 disables them
+diag_chunk: 1024         # response positions per lm_head chunk (oracle_kl's
+                         # POSITION_CHUNK): ~2.9 GiB fp32 transient at 248k
+                         # vocab; halve it to halve the transient
