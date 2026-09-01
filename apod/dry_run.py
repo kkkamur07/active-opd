@@ -43,11 +43,13 @@ def _parse(cmd: list[str]) -> tuple[str, dict[str, Any]]:
             stage = "oracle_kl"
         if tok.startswith("--"):
             key = tok[2:]
-            if i + 1 < len(cmd) and not cmd[i + 1].startswith("-"):
-                args[key] = cmd[i + 1]
-                i += 2
-                continue
-            args[key] = True
+            values = []
+            while i + 1 + len(values) < len(cmd) and not cmd[i + 1 + len(values)].startswith("-"):
+                values.append(cmd[i + 1 + len(values)])
+            # a flag's value; several (--eval-dataset math500 aime2526) as a list
+            args[key] = True if not values else values[0] if len(values) == 1 else values
+            i += 1 + len(values)
+            continue
         i += 1
     if stage is None:
         raise ValueError(f"dry-run cannot identify the stage in {cmd}")
@@ -79,34 +81,47 @@ def run_stub(cmd: list[str], run_dir: Path) -> None:
         raise ValueError(f"dry-run has no stub for {stage}")
 
 
+def _complete(path: Path, expected: int, resume: bool) -> bool:
+    """The stage's resume rule, coarsely: a shard file with every row is kept."""
+
+    return resume and path.exists() and len(read_jsonl(path)) == expected
+
+
 def _rollout_eval(cfg, run_dir: Path, rdir: Path, arm: str, refresh: int, args: dict[str, Any]) -> None:
     shard, num_shards = int(args["shard"]), int(args["num-shards"])
-    dataset = args.get("eval-dataset")
-    if dataset is None or dataset == str(cfg.eval.dataset):
-        subdir, pool_file, protocol = "eval", "eval_problems.jsonl", cfg.eval
-    else:
-        subdir, pool_file, protocol = f"eval_{dataset}", f"eval_problems_{dataset}.jsonl", cfg.eval_sets[dataset]
-    problems = read_jsonl(run_dir / "pool" / pool_file)
     step = refresh * int(cfg.driver.refresh_every)
-    rng = _rng("eval", arm, refresh, shard, subdir)
     p = min(0.9, 0.25 + 0.004 * step + _arm_offset(arm))
-    eval_dir = rdir / subdir
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    rows = []
-    for i, ex in enumerate(problems):
-        if i % num_shards != shard:
+    names = args.get("eval-dataset")
+    names = [None] if names is None else [names] if isinstance(names, str) else list(names)
+    for dataset in names:  # every eval set of the session, in the order given
+        if dataset is None or dataset == str(cfg.eval.dataset):
+            subdir, pool_file, protocol = "eval", "eval_problems.jsonl", cfg.eval
+        else:
+            subdir, pool_file, protocol = f"eval_{dataset}", f"eval_problems_{dataset}.jsonl", cfg.eval_sets[dataset]
+        problems = read_jsonl(run_dir / "pool" / pool_file)
+        if len(problems) != int(protocol.num_problems):
+            raise RuntimeError(f"pool/{pool_file}: {len(problems)} problems, protocol says {protocol.num_problems}")
+        eval_dir = rdir / subdir
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        mine = [(i, ex) for i, ex in enumerate(problems) if i % num_shards == shard]
+        shard_file = eval_dir / f"eval.shard{shard}.jsonl"
+        if _complete(shard_file, len(mine) * int(protocol.num_samples), bool(cfg.resume)):
+            (eval_dir / f"done.shard{shard}").touch()
             continue
-        for s in range(int(protocol.num_samples)):
-            truncated = bool(rng.random() < max(0.05, 0.5 - 0.003 * step))
-            correct = bool(rng.random() < p) and not truncated
-            rows.append({
-                "problem_index": i, "sample_index": s, "id": ex["id"],
-                "response_length": int(rng.integers(500, int(cfg.sampling.max_new_tokens))),
-                "truncated": truncated, "correct": correct, "has_answer": correct or bool(rng.random() < 0.5),
-                "has_boxed": correct and bool(rng.random() < 0.95), "gold_parsed": True,
-            })
-    write_jsonl(eval_dir / f"eval.shard{shard}.jsonl", rows)
-    (eval_dir / f"done.shard{shard}").touch()
+        rng = _rng("eval", arm, refresh, shard, subdir)
+        rows = []
+        for i, ex in mine:
+            for s in range(int(protocol.num_samples)):
+                truncated = bool(rng.random() < max(0.05, 0.5 - 0.003 * step))
+                correct = bool(rng.random() < p) and not truncated
+                rows.append({
+                    "problem_index": i, "sample_index": s, "id": ex["id"],
+                    "response_length": int(rng.integers(500, int(cfg.sampling.max_new_tokens))),
+                    "truncated": truncated, "correct": correct, "has_answer": correct or bool(rng.random() < 0.5),
+                    "has_boxed": correct and bool(rng.random() < 0.95), "gold_parsed": True,
+                })
+        write_jsonl(shard_file, rows)
+        (eval_dir / f"done.shard{shard}").touch()
     if args.get("eval-only"):
         return
 

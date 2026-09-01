@@ -18,14 +18,17 @@ refresh_every: 10
 #   selection:       all_k | random_k | entropy_top_k | kl_high | kl_mid | kl_low
 arms: {}
 
-# Question bank (apod/bank.py output) for the bank_* question sources; one
-# row per question with example_index, id, question, reference, bucket,
-# question_entropy, and the student grades/truncation/lengths.
-bank_path: outputs/runs/bank-8k/questions.jsonl
+# Question bank directory (python -m apod.bank; conf/bank.yaml) for the
+# bank_* question sources: apod.bank.load_bank reads its questions.jsonl,
+# one row per question (example_index, id, question, reference, bucket,
+# question_entropy, the student/teacher grades) in the pool's seeded order.
+bank_dir: ${bank.dir}
 
 # Named eval sets run at every refresh beside cfg.eval (MATH-500): each is
 # conf/eval/<name>.yaml, stamped into resolved_config.yaml as eval_sets.<name>
-# and evaluated by rollout_eval --eval-only --eval-dataset <name>.
+# and evaluated in the SAME rollout_eval engine session as MATH-500 and the
+# rollouts (--eval-dataset <cfg.eval.dataset> <name>...), each into its own
+# eval_<name>/ (ADR 0006).
 monitor_sets:
   - aime2526
 

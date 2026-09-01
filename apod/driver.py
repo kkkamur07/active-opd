@@ -12,8 +12,8 @@ at step = r * refresh_every:
      500) and on every driver.monitor_sets entry (AIME 2025+2026, avg@16),
      at the run cap, strict (no \\boxed = wrong, cap-hit included)
   2. roll out the refresh's block of questions from those same weights
-     (rollout_eval does 1 and 2 for MATH-500 in one engine session; each
-     monitor set is a further --eval-only launch)
+     (one rollout_eval engine session does 1 and 2: MATH-500 requests, the
+     monitor sets', then the rollouts -- --eval-dataset takes the list)
   3. score (entropy stage, or scripts/oracle_kl.py for reverse KL) and
      select trajectories per the arm's rule (apod.selection)
   4. train refresh_every steps (train stage under torchrun, continuing the
@@ -72,8 +72,7 @@ except ImportError:  # pragma: no cover - depends on the merge state
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 QUESTION_SOURCES = ("pool_random", "bank_bucket", "bank_top_entropy", "bank_random")
-BANK_FIELDS = ("example_index", "id", "question", "reference", "bucket", "question_entropy")
-WALL_CLOCK_KEYS = ("rollout_eval_s", "monitor_eval_s", "entropy_s", "oracle_s", "train_s")
+WALL_CLOCK_KEYS = ("rollout_eval_s", "entropy_s", "oracle_s", "train_s")
 
 
 def _log(msg: str) -> None:
@@ -180,18 +179,6 @@ def prepare_config(cfg: DictConfig, run_dir: Path) -> DictConfig:
 # ---------------------------------------------------------------------------
 
 
-def load_bank(path: Path) -> list[dict[str, Any]]:
-    """The question bank (apod/bank.py): one row per question with BANK_FIELDS."""
-
-    rows = read_jsonl(path)
-    if not rows:
-        raise FileNotFoundError(f"question bank {path} is missing or empty")
-    missing = [f for f in BANK_FIELDS if f not in rows[0]]
-    if missing:
-        raise KeyError(f"question bank {path} rows lack field(s) {missing}; expected {BANK_FIELDS}")
-    return rows
-
-
 def _from_bank(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -216,21 +203,24 @@ def parse_source(source: str) -> tuple[str, str]:
 
 
 def select_questions(
-    source: str, *, n: int, seed: int, bank_path: Path, dry_run: bool, data_cfg: DictConfig | None = None
+    source: str, *, n: int, seed: int, bank_dir: Path, dry_run: bool, data_cfg: DictConfig | None = None
 ) -> list[dict[str, Any]]:
-    """The arm's n questions under ``source`` (conf/driver.yaml), seeded.
+    """The arm's n questions under ``source`` (conf/driver.yaml).
 
-    pool_random        random.Random(seed).sample of the OpenThoughts pool
-    bank_bucket:<b>    seeded sample of the bank questions in bucket b
+    pool_random        seeded sample of the OpenThoughts pool
+                       (apod.datasets.load.load_examples)
+    bank_bucket:<b>    the first n bank questions in bucket b
     bank_top_entropy   the n highest question_entropy bank questions
                        (ties -> lower bank example_index)
-    bank_random        seeded sample of the bank questions that have a
+    bank_random        the first n bank questions that have a
                        question_entropy -- the same candidates
                        bank_top_entropy ranks, so run 3's arms differ only
                        in the ranking
-    """
 
-    import random
+    The bank (apod.bank, ``bank_dir/questions.jsonl``) lists its questions in
+    the pool's seeded order, so "the first n" of a bank source is a seeded
+    random sample and every arm of a run reads the same file.
+    """
 
     kind, bucket = parse_source(source)
     if kind == "pool_random":
@@ -246,17 +236,26 @@ def select_questions(
         )
         return [{"id": ex["id"], "question": ex["prompt"], "reference": ex["answer"]} for ex in examples]
 
-    bank = load_bank(bank_path)
+    from apod import bank
+
+    rows = bank.load_bank(bank_dir)
+    if not rows:
+        raise FileNotFoundError(f"question bank {bank_dir}/questions.jsonl is missing or empty (python -m apod.bank)")
     if kind == "bank_bucket":
-        candidates = [r for r in bank if r["bucket"] == bucket]
+        if bucket not in bank.BUCKETS:
+            raise ValueError(f"question source {source!r}: unknown correctness bucket; expected one of {bank.BUCKETS}")
+        candidates = bank.bucket_questions(rows, bucket)
     else:
-        candidates = [r for r in bank if r.get("question_entropy") is not None]
+        candidates = [r for r in rows if r.get("question_entropy") is not None]
     if len(candidates) < n:
-        raise ValueError(f"question source {source!r}: {len(candidates)} candidate questions in {bank_path}, need {n}")
+        raise ValueError(
+            f"question source {source!r}: {len(candidates)} candidate questions in {bank_dir} "
+            f"(buckets: {dict(bank.bucket_counts(rows))}), need {n}"
+        )
     if kind == "bank_top_entropy":
         chosen = sorted(candidates, key=lambda r: (-r["question_entropy"], r["example_index"]))[:n]
     else:
-        chosen = random.Random(seed).sample(candidates, n)
+        chosen = candidates[:n]
     return [_from_bank(r) for r in chosen]
 
 
@@ -422,7 +421,7 @@ class Driver:
             self.arms[arm]["question_source"],
             n=b.num_questions,
             seed=int(self.cfg.seed),
-            bank_path=Path(str(self.cfg.driver.bank_path)),
+            bank_dir=Path(str(self.cfg.driver.bank_dir)),
             dry_run=self.dry_run,
             data_cfg=self.cfg.data,
         )
@@ -506,24 +505,30 @@ class Driver:
             _log(f"[{arm}] step-0 {subdir} reused from arm {other}")
             return
 
-    def run_rollout_eval(self, arm: str, refresh: int, *, eval_only: bool, dataset: str | None) -> float | None:
-        """rollout_eval for cfg.eval (+ rollouts unless eval_only) or a monitor set."""
+    def run_rollout_eval(self, arm: str, refresh: int, *, eval_only: bool) -> float | None:
+        """One rollout_eval engine session: cfg.eval and every monitor set
+        (``--eval-dataset <cfg.eval.dataset> <monitor>...``, each into its own
+        eval dir), plus this refresh's rollouts unless eval_only."""
 
         rdir = paths.round_dir(self.run_dir, arm, refresh)
-        subdir, _, protocol = self.eval_protocol(dataset)
-        expected = int(protocol.num_problems) * int(protocol.num_samples)
-        if refresh == 0:
-            self.reuse_step0_eval(arm, subdir, expected)
-        done = self.markers_present(rdir / subdir) and (eval_only or self.markers_present(rdir / "rollouts"))
-        tag = f"{arm}/step{refresh * self.budget.refresh_every:03d}/{subdir}" + ("" if eval_only else "+rollouts")
+        sets = [None, *self.monitor_sets]
+        subdirs = []
+        for name in sets:
+            subdir, _, protocol = self.eval_protocol(name)
+            subdirs.append(subdir)
+            if refresh == 0:
+                self.reuse_step0_eval(arm, subdir, int(protocol.num_problems) * int(protocol.num_samples))
+        done = all(self.markers_present(rdir / subdir) for subdir in subdirs) and (
+            eval_only or self.markers_present(rdir / "rollouts")
+        )
+        tag = f"{arm}/step{refresh * self.budget.refresh_every:03d}/eval" + ("" if eval_only else "+rollouts")
         if self.resume and done:
             _log(f"[{tag}] skip (done markers present)")
             return None
         extra = ["--num-shards", str(self.num_gpus)]
         if eval_only:
             extra.append("--eval-only")
-        if dataset is not None:
-            extra += ["--eval-dataset", dataset]
+        extra += ["--eval-dataset", str(self.cfg.eval.dataset), *self.monitor_sets]
         t0 = time.time()
         self.launch(self.sharded(lambda k: self.stage_cmd("rollout_eval", arm, refresh, ["--shard", str(k), *extra]), tag))
         return time.time() - t0
@@ -676,10 +681,9 @@ class Driver:
         wall: dict[str, float | None] = {k: None for k in WALL_CLOCK_KEYS}
         _log(f"== [{arm}] step {step:03d} (refresh {refresh}{', final eval' if final else ''}) :: {self.model_path(arm, refresh)}")
 
-        # 1 + 2: eval on cfg.eval (+ this refresh's rollouts), then the monitor sets.
-        wall["rollout_eval_s"] = self.run_rollout_eval(arm, refresh, eval_only=final, dataset=None)
-        monitor_s = [self.run_rollout_eval(arm, refresh, eval_only=True, dataset=name) for name in self.monitor_sets]
-        wall["monitor_eval_s"] = sum(s for s in monitor_s if s is not None) if any(s is not None for s in monitor_s) else None
+        # 1 + 2: eval on cfg.eval and the monitor sets + this refresh's
+        # rollouts, one engine session.
+        wall["rollout_eval_s"] = self.run_rollout_eval(arm, refresh, eval_only=final)
         evals = {}
         for name in [None, *self.monitor_sets]:
             subdir, _, protocol = self.eval_protocol(name)

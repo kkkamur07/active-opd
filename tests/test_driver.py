@@ -29,13 +29,13 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from apod import paths
+from apod.bank import BUCKETS
 from apod.datasets.io import read_jsonl, write_jsonl
 from apod.driver import Driver, budget_from, compose_config, prepare_config, run
 from apod.selection import KL_TERTILES
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENTS = ("r1_correctness_8k", "r2_trajsel_8k", "r3_qentropy_8k")
-BUCKETS = ("teacher_right_student_wrong", "both_right", "both_wrong", "mixed", "unlabelled")
 NUM_GPUS = 2
 
 
@@ -46,8 +46,9 @@ def _tmp(name: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"apod-{name}-"))
 
 
-def _write_bank(path: Path, per_bucket: int = 850) -> list[dict]:
-    """A synthetic apod/bank.py output: per_bucket questions per bucket."""
+def _write_bank(bank_dir: Path, per_bucket: int = 850) -> list[dict]:
+    """A synthetic apod/bank.py output (bank_dir/questions.jsonl, rows in the
+    pool's seeded order): per_bucket questions per bucket."""
 
     rng = random.Random(7)
     rows = []
@@ -61,16 +62,22 @@ def _write_bank(path: Path, per_bucket: int = 850) -> list[dict]:
             "student_truncated": [bool(rng.random() < 0.3) for _ in range(4)],
             "student_lengths": [rng.randint(100, 8192) for _ in range(4)],
         })
-    write_jsonl(path, rows)
+    write_jsonl(bank_dir / "questions.jsonl", rows)
     return rows
 
 
 def _run(experiment: str, out: Path, bank: Path, extra: list[str] = ()) -> Path:
     cfg = compose_config([
         f"+experiment={experiment}", "driver.dry_run=true", f"output_dir={out}",
-        f"driver.bank_path={bank}", f"num_gpus={NUM_GPUS}", *extra,
+        f"driver.bank_dir={bank}", f"num_gpus={NUM_GPUS}", *extra,
     ])
     return run(cfg)
+
+
+def _metrics(out: Path) -> list[dict]:
+    """metrics.jsonl rows without the timings (the one field a resume may change)."""
+
+    return [{k: v for k, v in r.items() if k != "wall_clock"} for r in read_jsonl(out / "metrics.jsonl")]
 
 
 def _launches(out: Path) -> list[dict]:
@@ -157,12 +164,15 @@ def _check_full_run(experiment: str, out: Path, bank_rows: list[dict]) -> None:
             r = int(_flag(l["cmd"], "--round"))
             expected = str(cfg.model.student_id) if r == 0 else str(paths.checkpoint_dir(out, arm, r - 1))
             assert _flag(l["cmd"], "--student-path") == expected
-        rollouts = [l for l in mine if _stage(l["cmd"]) == "rollout_eval" and "--eval-only" not in l["cmd"]]
-        aime = [l for l in mine if _stage(l["cmd"]) == "rollout_eval" and "--eval-dataset" in l["cmd"]]
-        finals = [l for l in mine if _stage(l["cmd"]) == "rollout_eval" and "--eval-only" in l["cmd"] and "--eval-dataset" not in l["cmd"]]
+        sessions = [l for l in mine if _stage(l["cmd"]) == "rollout_eval"]
+        rollouts = [l for l in sessions if "--eval-only" not in l["cmd"]]
+        finals = [l for l in sessions if "--eval-only" in l["cmd"]]
         assert len(rollouts) == 10 * NUM_GPUS and len(finals) == 1 * NUM_GPUS
-        # AIME at every refresh incl. the final; step 0 reused from the first arm.
-        assert len(aime) == (11 if arm == arms[0] else 10) * NUM_GPUS
+        # MATH-500 and AIME in the SAME session at every refresh incl. the
+        # final (never a second launch); step-0 evals reused from the first arm.
+        for l in sessions:
+            i = l["cmd"].index("--eval-dataset")
+            assert l["cmd"][i + 1:i + 3] == ["math500", "aime2526"], l["cmd"]
         if arm != arms[0]:
             for subdir in ("eval", "eval_aime2526"):
                 assert (paths.round_dir(out, arm, 0) / subdir / "reused_from.json").exists()
@@ -214,7 +224,7 @@ def _check_full_run(experiment: str, out: Path, bank_rows: list[dict]) -> None:
 def test_kl_tertiles_partition_each_question() -> None:
     """kl_high/mid/low arms at the same refresh: ranks by KL are disjoint slices."""
 
-    out, bank = _tmp("r2"), _tmp("bank") / "questions.jsonl"
+    out, bank = _tmp("r2"), _tmp("bank")
     _write_bank(bank)
     _run("r2_trajsel_8k", out, bank)
     arm = "kl_high"
@@ -229,11 +239,11 @@ def test_kl_tertiles_partition_each_question() -> None:
         all_kls = sorted((v for (e, _), v in oracle.items() if e == q), reverse=True)
         assert sorted(kls, reverse=True) == all_kls[:4], "kl_high keeps the top 4 by reverse KL"
     shutil.rmtree(out)
+    shutil.rmtree(bank)
 
 
 def test_full_runs_and_never_rewrite_config() -> None:
-    bank_dir = _tmp("bank")
-    bank = bank_dir / "questions.jsonl"
+    bank = _tmp("bank")
     bank_rows = _write_bank(bank)
     for experiment in EXPERIMENTS:
         out = _tmp(experiment)
@@ -249,7 +259,7 @@ def test_full_runs_and_never_rewrite_config() -> None:
         assert _launches(out) == []
         assert (out / "metrics.jsonl").read_text() == metrics_before
         shutil.rmtree(out)
-    shutil.rmtree(bank_dir)
+    shutil.rmtree(bank)
 
 
 def _restore_crash_state(out: Path, arm: str, boundary: int) -> None:
@@ -270,12 +280,11 @@ def _restore_crash_state(out: Path, arm: str, boundary: int) -> None:
 
 
 def test_resume_from_every_boundary() -> None:
-    bank_dir = _tmp("bank")
-    bank = bank_dir / "questions.jsonl"
+    bank = _tmp("bank")
     _write_bank(bank)
     out = _tmp("resume")
     _run("r3_qentropy_8k", out, bank)
-    reference = (out / "metrics.jsonl").read_text()
+    reference = _metrics(out)
     arm = list(OmegaConf.load(out / "resolved_config.yaml").driver.arms)[-1]
     for boundary in range(0, 11):
         _restore_crash_state(out, arm, boundary)
@@ -286,7 +295,7 @@ def test_resume_from_every_boundary() -> None:
         assert min(int(_flag(l["cmd"], "--round")) for l in launches) == boundary
         trains = [int(_flag(l["cmd"], "--global-step-offset")) for l in launches if _stage(l["cmd"]) == "train"]
         assert trains == list(range(boundary * 10, 100, 10)), (boundary, trains)
-        assert (out / "metrics.jsonl").read_text() == reference, f"boundary {boundary}: metrics differ after resume"
+        assert _metrics(out) == reference, f"boundary {boundary}: metrics differ after resume"
 
     # Mid-refresh states at refresh 4: (a) rollouts + evals done, nothing
     # after; (b) selection done, train not; (c) train done, metrics row not.
@@ -303,45 +312,45 @@ def test_resume_from_every_boundary() -> None:
         _run("r3_qentropy_8k", out, bank)
         at4 = {_stage(l["cmd"]) for l in _launches(out) if int(_flag(l["cmd"], "--round")) == 4}
         assert at4 == expect, (remove, at4)
-        assert (out / "metrics.jsonl").read_text() == reference
+        assert _metrics(out) == reference
 
     mid(["selected", "train", "checkpoint"], {"train"})
     mid(["train", "checkpoint"], {"train"})
     mid([], set())
+    # A lost monitor eval re-enters the session; the finished MATH-500 rows
+    # and rollouts of that refresh are kept (deterministic stubs: same rows).
     mid(["eval_aime2526", "selected", "train", "checkpoint"], {"rollout_eval", "train"})
     shutil.rmtree(out)
-    shutil.rmtree(bank_dir)
+    shutil.rmtree(bank)
 
 
 def test_pool_link_guard() -> None:
     """Rollouts generated under another arm's pool file are refused."""
 
-    bank_dir = _tmp("bank")
-    bank = bank_dir / "questions.jsonl"
+    bank = _tmp("bank")
     _write_bank(bank)
     out = _tmp("guard")
-    cfg = compose_config(["+experiment=r1_correctness_8k", "driver.dry_run=true", f"output_dir={out}", f"driver.bank_path={bank}"])
+    cfg = compose_config(["+experiment=r1_correctness_8k", "driver.dry_run=true", f"output_dir={out}", f"driver.bank_dir={bank}"])
     cfg = prepare_config(cfg, out)
     driver = Driver(cfg, out)
     driver.materialize_eval_sets()
     questions = {arm: driver.write_questions(arm) for arm in ("both_right", "mixed")}
     driver.point_pool_at("both_right")
-    driver.run_rollout_eval("mixed", 0, eval_only=False, dataset=None)  # stage ran under the wrong link
+    driver.run_rollout_eval("mixed", 0, eval_only=False)  # stage ran under the wrong link
     try:
         driver.verify_rollouts("mixed", 0, questions["mixed"])
     except RuntimeError as e:
         assert "another arm" in str(e)
     else:
         raise AssertionError("rollouts of another arm's questions must be refused")
-    driver.run_rollout_eval("both_right", 0, eval_only=False, dataset=None)  # the right link
+    driver.run_rollout_eval("both_right", 0, eval_only=False)  # the right link
     assert len(driver.verify_rollouts("both_right", 0, questions["both_right"])) == 320
     shutil.rmtree(out)
-    shutil.rmtree(bank_dir)
+    shutil.rmtree(bank)
 
 
 def test_plot_cli() -> None:
-    bank_dir = _tmp("bank")
-    bank = bank_dir / "questions.jsonl"
+    bank = _tmp("bank")
     _write_bank(bank)
     out = _tmp("plot")
     _run("r3_qentropy_8k", out, bank)
@@ -349,7 +358,7 @@ def test_plot_cli() -> None:
     subprocess.run([sys.executable, "-m", "apod.plotting", "--run-dir", str(out), "--band-points", "7"], check=True, cwd=ROOT)
     assert (out / "plots" / "accuracy_vs_steps.png").exists()
     shutil.rmtree(out)
-    shutil.rmtree(bank_dir)
+    shutil.rmtree(bank)
 
 
 def test_selection_self_test() -> None:

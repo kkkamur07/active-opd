@@ -109,17 +109,20 @@ Stages are plain scripts (NOT Hydra apps — only the driver is); they load
 `subprocess` with `CUDA_VISIBLE_DEVICES` set to the shard's GPU.
 
 ```
-python -m apod.stages.rollout_eval --run-dir D --arm A --round R --shard K --num-shards N [--eval-only] [--eval-num-problems M] [--eval-dataset NAME]
-    one vLLM engine session and ONE generate stream: MATH-500 eval requests
-    first, then rollouts (skipped with --eval-only for the final round),
-    packed into target_concurrent_sequences-sized chunks that may hold
-    both; separate files and done-markers per kind; prints throughput.
-    --eval-dataset NAME (a conf/eval/NAME.yaml key other than cfg.eval.dataset,
-    e.g. aime2526) evaluates pool/eval_problems_NAME.jsonl under NAME's own
-    protocol (num_problems, num_samples, seed offset; cfg.eval_sets.NAME in
-    resolved_config.yaml overrides the conf file) into eval_NAME/; the default
-    keeps eval/ byte-identical. The AIME 2025+2026 monitor (ADR 0006) is a
-    second --eval-only launch of this stage per refresh, at the run cap
+python -m apod.stages.rollout_eval --run-dir D --arm A --round R --shard K --num-shards N [--eval-only] [--eval-num-problems M] [--eval-dataset NAME...]
+    one vLLM engine session and ONE generate stream: eval requests first
+    (sets in the order given), then rollouts (skipped with --eval-only for
+    the final round), packed into target_concurrent_sequences-sized chunks
+    that may hold any mix (max_num_seqs follows the target above 256);
+    separate files and done-markers per eval set and for rollouts; prints
+    throughput. --eval-dataset NAME (a conf/eval/NAME.yaml key other than
+    cfg.eval.dataset, e.g. aime2526) evaluates pool/eval_problems_NAME.jsonl
+    under NAME's own protocol (num_problems, num_samples, seed offset;
+    cfg.eval_sets.NAME in resolved_config.yaml overrides the conf file) into
+    eval_NAME/; the default keeps eval/ byte-identical. Several names share
+    the session: the step-based driver passes `--eval-dataset math500
+    aime2526` at every refresh, so the AIME 2025+2026 monitor (ADR 0006)
+    never costs a second launch, at the run cap
 python -m apod.stages.entropy      --run-dir D --arm A --round R --shard K --num-shards N
     HF forward entropy scoring of that round's trajectories (run only for
     entropy_top4 unless selection.score_all_arms)
@@ -285,7 +288,7 @@ persisted, keep-last-2 weights):
 | key | meaning |
 |---|---|
 | `driver.steps_total`, `driver.refresh_every` | 100, 10 -> 10 refreshes x 320 trajectories = 80 questions x `selection.k` |
-| `driver.arms.<name>.question_source` | `pool_random` (seeded OpenThoughts sample), `bank_bucket:<bucket>`, `bank_top_entropy`, `bank_random` (bank = `driver.bank_path`, apod/bank.py) |
+| `driver.arms.<name>.question_source` | `pool_random` (seeded OpenThoughts sample), `bank_bucket:<bucket>` (the bucket's first 800 in the bank's seeded order), `bank_top_entropy` (highest `question_entropy`), `bank_random` (first 800 with an entropy) -- bank = `driver.bank_dir` (`${bank.dir}`), read with `apod.bank.load_bank` / `bucket_questions` |
 | `driver.arms.<name>.selection` | a rule of `apod.selection.RULES` |
 | `driver.monitor_sets` | named eval sets beside `cfg.eval`; stamped as `eval_sets.<name>` from `conf/eval/<name>.yaml` |
 | `driver.kl_estimator` | `scripts/oracle_kl.py --estimator` for the `kl_*` rules (`exact` / `mc`) |
@@ -302,11 +305,12 @@ persisted, keep-last-2 weights):
 Per arm (sequential, in `driver.arms` order), refresh r at step
 `r * refresh_every`:
 
-1. `rollout_eval` (sharded over `num_gpus`): MATH-500 eval of the current
-   weights + this refresh's rollouts in one engine session; then
-   `rollout_eval --eval-only --eval-dataset <name>` per monitor set. Step 0
-   evaluates the same base model in every arm, so its eval rows are copied
-   from the first finished arm (`reused_from.json`); rollouts are never shared.
+1. `rollout_eval` (sharded over `num_gpus`), ONE engine session per
+   refresh: MATH-500 eval of the current weights, every monitor set
+   (`--eval-dataset math500 aime2526`, own `eval_<name>/`), then this
+   refresh's rollouts. Step 0 evaluates the same base model in every arm, so
+   its eval rows are copied from the first finished arm (`reused_from.json`);
+   rollouts are never shared.
 2. scoring, only when the rule needs it: `apod.stages.entropy`
    (`entropy_top_k`) or `scripts/oracle_kl.py --student-path <weights>
    --estimator <kl_estimator>` (`kl_*`), sharded.
@@ -346,7 +350,7 @@ num_trajectories, cap_hit_rate, strict_accuracy, mean_response_length}|null,
 selected: {num_trajectories, mean_entropy, mean_reverse_kl, cap_hit_rate,
 strict_accuracy, mean_response_length}|null, train_loss_mean,
 train_loss_final, tokens_trained, wall_clock: {rollout_eval_s,
-monitor_eval_s, entropy_s, oracle_s, train_s}}`. The eval fields measure
+entropy_s, oracle_s, train_s}}`. The eval fields measure
 the weights at `step`; the train fields belong to the block trained after
 that eval (steps `step .. step + refresh_every`); the final row has null
 rollout/train fields.
