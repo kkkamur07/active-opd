@@ -5,7 +5,9 @@ rollouts from that same engine (skipped with ``--eval-only`` for the final
 eval-only round). Written against ``docs/pipeline.md``; loads
 ``<run-dir>/resolved_config.yaml`` with ``OmegaConf.load`` (stages are plain
 scripts, not Hydra apps). The driver launches one process per shard with
-``CUDA_VISIBLE_DEVICES`` set to that shard's GPU.
+``CUDA_VISIBLE_DEVICES`` set to that shard's GPU. ``--eval-dataset <name>``
+evaluates a named set (``conf/eval/<name>.yaml``, e.g. the AIME 2025+2026
+monitor) into ``eval_<name>/`` instead of the MATH-500 ``eval/``.
 
 Seeds:
   eval     -- deterministic per (round, problem):
@@ -119,7 +121,40 @@ def parse_args(argv: list[str] | None):
         help="evaluate only the first N problems of the materialized set "
         "(driver sends the intermediate-round subset; default: all)",
     )
+    parser.add_argument(
+        "--eval-dataset",
+        default=None,
+        help="named eval set (conf/eval/<name>.yaml); default cfg.eval.dataset "
+        "(MATH-500). A non-default set reads pool/eval_problems_<name>.jsonl "
+        "and writes eval_<name>/ (see select_eval_set)",
+    )
     return parse_stage_args(parser, argv)
+
+
+def select_eval_set(cfg, name: str | None) -> tuple[str, str]:
+    """(eval subdir, pool file name) for the requested eval set.
+
+    The default (``cfg.eval.dataset``) keeps the ``eval/`` +
+    ``pool/eval_problems.jsonl`` layout byte-identical. A named set swaps
+    ``cfg.eval`` for that benchmark's protocol (num_problems, num_samples,
+    eval_seed_offset) -- ``cfg.eval_sets.<name>`` when the launcher stamped
+    one into resolved_config.yaml (scripts/terminal_eval.py --num-samples),
+    else ``conf/eval/<name>.yaml`` -- and goes to ``eval_<name>/`` +
+    ``pool/eval_problems_<name>.jsonl``, which the launcher materializes like
+    the driver does for the monitor set.
+    """
+
+    if name is None or name == str(cfg.eval.dataset):
+        return "eval", "eval_problems.jsonl"
+    stamped = cfg.get("eval_sets", {}).get(name)
+    if stamped is not None:
+        cfg.eval = stamped
+    else:
+        conf = Path(__file__).resolve().parents[2] / "conf" / "eval" / f"{name}.yaml"
+        if not conf.exists():
+            raise FileNotFoundError(f"no eval protocol for {name!r}: {conf}")
+        cfg.eval = OmegaConf.load(conf)
+    return f"eval_{name}", f"eval_problems_{name}.jsonl"
 
 
 def resolve_model_path(run_dir: Path, arm: str, round_index: int, cfg) -> str:
@@ -461,9 +496,10 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(args.run_dir)
     cfg = OmegaConf.load(run_dir / "resolved_config.yaml")
     resume = bool(cfg.resume)
+    eval_subdir, eval_pool_file = select_eval_set(cfg, args.eval_dataset)
 
     round_dir = paths.round_dir(run_dir, args.arm, args.round_index)
-    eval_dir = round_dir / "eval"
+    eval_dir = round_dir / eval_subdir
     rollouts_dir = round_dir / "rollouts"
     eval_dir.mkdir(parents=True, exist_ok=True)
     eval_marker = eval_dir / f"done.shard{args.shard}"
@@ -476,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
     model_path = resolve_model_path(run_dir, args.arm, args.round_index, cfg)
     print(
         f"{args.arm} round {args.round_index} shard {args.shard}/{args.num_shards}: "
-        f"model {model_path}" + ("  (eval only)" if args.eval_only else ""),
+        f"model {model_path}" + ("  (eval only)" if args.eval_only else "")
+        + (f"  eval set {cfg.eval.dataset} -> {eval_subdir}/" if eval_subdir != "eval" else ""),
         flush=True,
     )
     if not args.eval_only:
@@ -490,12 +527,13 @@ def main(argv: list[str] | None = None) -> int:
     # so problem_index -> problem is immutable for the run's lifetime; loading
     # from the live Hub dataset here would let an upstream update silently
     # remap indices between rounds.
-    problems = read_jsonl(run_dir / "pool" / "eval_problems.jsonl")
+    problems = read_jsonl(run_dir / "pool" / eval_pool_file)
     if len(problems) != int(cfg.eval.num_problems):
         raise RuntimeError(
-            f"pool/eval_problems.jsonl has {len(problems)} problems, expected "
+            f"pool/{eval_pool_file} has {len(problems)} problems, expected "
             f"eval.num_problems={cfg.eval.num_problems}; run the driver "
-            "(apod.main) to materialize the eval set before invoking stages"
+            "(apod.main) or scripts/terminal_eval.py to materialize the eval "
+            "set before invoking stages"
         )
     # Intermediate rounds evaluate a PREFIX of the materialized set, so
     # problem_index means the same problem at every round and eval size.
