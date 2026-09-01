@@ -257,6 +257,9 @@ def run_train(arm: str, rnd: int) -> None:
         "--nproc_per_node=2", "-m", "apod.stages.train",
         "--run-dir", str(RUN_DIR), "--arm", arm, "--round", str(rnd),
     ]
+    if WARMUP_OPT:
+        # Run-wide schedule: this pass resumes the LR curve at its global step.
+        cmd += ["--global-step-offset", str(rnd * KL50_STEPS_PER_ROUND)]
     log("launch: " + " ".join(cmd[5:]))
     subprocess.run(cmd, check=True, env={**os.environ, "HF_HUB_OFFLINE": "1"})
 
@@ -665,11 +668,13 @@ KL50W_DIR = ROOT / "outputs/runs/kl50w"
 KL50_TEACHER = ROOT / "outputs/runs/kl50_teacher"
 ORACLE8K = ROOT / "outputs/runs/oracle8k"
 KL50_PROMPTS = 136
+KL50_STEPS_PER_ROUND = KL50_PROMPTS * 4 // 32  # 544 selected rows / eff batch 32 = 17
 # kl50w (USER 2026-09-01: "restart the run with warmup again - with the
 # optimizer state stores as well ... and also we need to hyper parameter
 # tune for lr (with cosine decay or something)"): same arms/data/steps as
-# kl50, but per-round warmup+cosine LR cycles, Adam state persisted across
-# rounds (name-mapped, see train.py), and the peak LR picked by a probe.
+# kl50, but one run-wide warmup+cosine LR schedule, Adam state persisted
+# across rounds (name-mapped, see train.py), and the peak LR picked by a
+# probe + per-arm sweep + refine (3.16e-6).
 WARMUP_OPT = False   # set by --kl50w
 BANK_SRC = ORACLE8K  # kl50 banks from oracle8k; kl50w banks from kl50
 
@@ -738,21 +743,25 @@ def drive_kl50() -> None:
     _write_config(KL50_TEACHER, student_id="Qwen/Qwen3.5-9B",
                   num_rollouts=TEACHER_ROLLOUTS, cap=CAP, gpu_mem=0.95)
     if WARMUP_OPT:
-        # Per-round LR cycle: 1-step warmup (USER 2026-09-01: "5% warmup
-        # ratio is fair" -- 1/17 = 5.9%; the Adam-reset transient the longer
-        # warmup absorbed is gone once persist_optimizer carries the moments)
-        # then cosine to 10% of peak over the round's 17 steps.
+        # ONE LR schedule over the whole run (USER 2026-09-01 ~20:45: "it has
+        # to continue, fix that" -- a per-round warmup+cosine restarted the LR
+        # at [0, peak] every round while the Adam moments continued): warmup
+        # 3 steps at the start only (5% of 51, rounded up; USER: "5% warmup
+        # ratio is fair"), then cosine to 10% of peak over the 51 steps. Each
+        # round's train pass advances the scheduler by --global-step-offset
+        # (run_train) so its 17 steps land at the right point of the curve.
         # persist_optimizer makes each round a continuation of the last
         # (train.py name-maps the saved Adam state onto the new param order).
         cfg = OmegaConf.load(RUN_DIR / "resolved_config.yaml")
-        cfg.train.warmup_steps = 1
+        cfg.train.warmup_steps = 3
+        cfg.train.total_training_steps = TRAIN_ROUNDS * KL50_STEPS_PER_ROUND
         cfg.train.lr_scheduler_type = "cosine_with_min_lr"
         cfg.train.lr_scheduler_kwargs = {"min_lr_rate": 0.1}
         cfg.train.persist_optimizer = True
         OmegaConf.save(config=cfg, f=RUN_DIR / "resolved_config.yaml", resolve=True)
         log(f"kl50w: warmup {cfg.train.warmup_steps} + "
-            "cosine_with_min_lr(min_lr_rate=0.1) per round, "
-            "Adam state persisted across rounds")
+            f"cosine_with_min_lr(min_lr_rate=0.1) over {cfg.train.total_training_steps} "
+            "steps run-wide, Adam state persisted across rounds")
     # Warmup history: a warmup_steps=2 + constant_with_warmup patch ran here
     # for the round-2 trains only (it did kill the Adam-reset restart spike:
     # kl_high r2 opened 0.066/0.065 vs r1's 0.067->0.175, grad_norm 0.53 vs

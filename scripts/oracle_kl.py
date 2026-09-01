@@ -68,6 +68,7 @@ STUDENT_ID = "Qwen/Qwen3.5-2B"
 TEACHER_ID = "Qwen/Qwen3.5-9B"
 POSITION_CHUNK = 1024  # fp32 log-softmax over 248k vocab, 1024 positions ~ 1 GiB
 K_OVERLAP = 16  # Rethinking-OPD's trained k for Eq. 6-7; fixed, no sweep (USER 2026-08-31)
+MC_SAMPLES = (1, 2, 4, 8, 16, 32, 64, 128)  # --estimator mcn draw counts (USER 2026-09-01)
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,11 +79,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--analyze", action="store_true", help="analyze finished shards, no GPU")
-    p.add_argument("--estimator", choices=("exact", "mc"), default="exact",
+    p.add_argument("--estimator", choices=("exact", "mc", "mcn"), default="exact",
                    help="exact: full-vocab KLs/entropies/top-16 (the selection statistic); "
-                        "mc: sampled-token estimate, written to oracle_kl_mc.shard*.jsonl")
+                        "mc: sampled-token estimate, written to oracle_kl_mc.shard*.jsonl; "
+                        "mcn: exact + sampled-token + n-draw estimates (n in MC_SAMPLES), "
+                        "written to oracle_kl_mcn.shard*.jsonl")
     p.add_argument("--validate-mc", action="store_true",
-                   help="no GPU: per-prompt Spearman + tertile agreement of rkl_mc vs exact")
+                   help="no GPU: per-prompt Spearman + tertile agreement vs the exact KL "
+                        "for every sampled estimator found (rkl_mc, rkl_mc_n*)")
     p.add_argument("--student-path", default=STUDENT_ID,
                    help="student model id or checkpoint dir (re-scoring later rounds)")
     p.add_argument("--tokens-dir", type=Path, default=None,
@@ -101,7 +105,7 @@ def oracle_dir(args) -> Path:
 
 
 def out_path(args, shard: int) -> Path:
-    stem = "oracle_kl_mc" if args.estimator == "mc" else "oracle_kl"
+    stem = {"exact": "oracle_kl", "mc": "oracle_kl_mc", "mcn": "oracle_kl_mcn"}[args.estimator]
     return oracle_dir(args) / f"{stem}.shard{shard}.jsonl"
 
 
@@ -188,6 +192,46 @@ def _mc_scores(s_head, t_head, s_hidden, t_hidden, ids, plen: int, total: int) -
     return {"rkl_mc": [float(diff_sum[r]) / max(n, 1) for r in range(b)]}
 
 
+def _mcn_scores(s_head, t_head, s_hidden, t_hidden, ids, plen: int, total: int) -> dict[str, list[float]]:
+    """How many sampled tokens per position does a Monte-Carlo reverse KL
+    need before it ranks like the exact one? From the same fp32 log-softmaxes:
+    the exact full-vocab KL, the generation-time sampled-token estimate
+    (``rkl_mc``, the token actually emitted under top_p/top_k sampling), and
+    ``rkl_mc_n{n}`` for n in MC_SAMPLES -- n tokens drawn i.i.d. from the
+    student's FULL distribution at every position (prefixes of one
+    MC_SAMPLES[-1]-draw, so the estimates are nested), unbiased for the exact
+    KL with variance ~1/n."""
+    import torch
+
+    b = s_hidden.shape[0]
+    device = s_hidden.device
+    n_max = MC_SAMPLES[-1]
+    rkl_sum = torch.zeros(b, device=device)
+    taken_sum = torch.zeros(b, device=device)
+    draw_sum = torch.zeros(b, n_max, device=device)
+    n = 0
+    for lo in range(plen - 1, total - 1, POSITION_CHUNK):
+        hi = min(lo + POSITION_CHUNK, total - 1)
+        lp_s = torch.log_softmax(s_head(s_hidden[:, lo:hi]).float(), dim=-1)
+        lp_t = torch.log_softmax(t_head(t_hidden[:, lo:hi]).float(), dim=-1)
+        probs = lp_s.exp()
+        rkl_sum += (probs * (lp_s - lp_t)).sum(-1).sum(-1)
+        target = ids[:, lo + 1 : hi + 1].unsqueeze(-1)
+        taken_sum += (lp_s.gather(-1, target) - lp_t.gather(-1, target)).squeeze(-1).sum(-1)
+        draws = torch.multinomial(probs.view(-1, probs.shape[-1]), n_max, replacement=True)
+        draws = draws.view(b, hi - lo, n_max)
+        draw_sum += (lp_s.gather(-1, draws) - lp_t.gather(-1, draws)).sum(1)
+        n += hi - lo
+    return {
+        "mean_reverse_kl": [float(rkl_sum[r]) / max(n, 1) for r in range(b)],
+        "rkl_mc": [float(taken_sum[r]) / max(n, 1) for r in range(b)],
+        **{
+            f"rkl_mc_n{k}": [float(draw_sum[r, :k].sum()) / max(n * k, 1) for r in range(b)]
+            for k in MC_SAMPLES
+        },
+    }
+
+
 def compute(args) -> None:
     import torch
     from transformers import AutoModelForCausalLM
@@ -201,8 +245,9 @@ def compute(args) -> None:
 
     out = out_path(args, args.shard)
     out.parent.mkdir(parents=True, exist_ok=True)
-    # exact: pre-Eq.6-7 rows get re-scored; mc: its own file, its own key.
-    done_key = "rkl_mc" if args.estimator == "mc" else "overlap_ratio_top16"
+    # exact: pre-Eq.6-7 rows get re-scored; mc/mcn: own file, own key.
+    done_key = {"exact": "overlap_ratio_top16", "mc": "rkl_mc",
+                "mcn": f"rkl_mc_n{MC_SAMPLES[-1]}"}[args.estimator]
     done = set()
     if out.exists():
         with out.open() as f:
@@ -223,6 +268,7 @@ def compute(args) -> None:
     # position chunk. Same pattern as the entropy stage; identical numbers.
     t_body, t_head = _decoder_and_head(teacher)
     s_body, s_head = _decoder_and_head(student)
+    torch.manual_seed(1000 + args.shard)  # mcn draws reproducible per shard
 
     with out.open("a") as f:
         for npz_path in npzs:
@@ -252,6 +298,8 @@ def compute(args) -> None:
                         s_hidden = s_hidden[0] if isinstance(s_hidden, tuple) else s_hidden.last_hidden_state
                         if args.estimator == "mc":
                             scores = _mc_scores(s_head, t_head, s_hidden, t_hidden, ids, plen, total)
+                        elif args.estimator == "mcn":
+                            scores = _mcn_scores(s_head, t_head, s_hidden, t_hidden, ids, plen, total)
                         else:
                             scores = _exact_scores(s_head, t_head, s_hidden, t_hidden, plen, total)
                     for row, k in enumerate(group):
@@ -294,20 +342,31 @@ def _last_rows(directory: Path, pattern: str, key: str) -> dict[tuple[int, int],
 
 
 def validate_mc(args) -> None:
-    """Is rkl_mc a usable stand-in for the exact statistic? Per prompt: rank
-    agreement of the two scores over its rollouts, and whether they put each
-    rollout in the same tertile (the kl_high/kl_mid/kl_low rule of
-    scripts/bucket_experiment.py write_selection: sort desc, 3 equal
-    slices)."""
+    """Is a sampled estimator a usable stand-in for the exact statistic? Per
+    prompt: rank agreement of the two scores over its rollouts, and whether
+    they put each rollout in the same tertile (the kl_high/kl_mid/kl_low rule
+    of scripts/bucket_experiment.py write_selection: sort desc, 3 equal
+    slices). Reports every estimator found: rkl_mc from the mc file, and
+    rkl_mc / rkl_mc_n* from the mcn file (whose rows also carry the exact KL
+    from the same pass, used when no exact file exists)."""
     odir = oracle_dir(args)
     exact = _last_rows(odir, "oracle_kl.shard*.jsonl", "mean_reverse_kl")
-    mc = _last_rows(odir, "oracle_kl_mc.shard*.jsonl", "rkl_mc")
+    exact.update(_last_rows(odir, "oracle_kl_mcn.shard*.jsonl", "mean_reverse_kl"))
+    candidates = [("oracle_kl_mc.shard*.jsonl", "rkl_mc"), ("oracle_kl_mcn.shard*.jsonl", "rkl_mc")]
+    candidates += [("oracle_kl_mcn.shard*.jsonl", f"rkl_mc_n{n}") for n in MC_SAMPLES]
+    for pattern, key in candidates:
+        mc = _last_rows(odir, pattern, key)
+        if mc:
+            _validate_one(exact, mc, key, f"{pattern.split('.')[0]}:{key}")
+
+
+def _validate_one(exact: dict, mc: dict, key: str, label: str) -> None:
     keys = sorted(set(exact) & set(mc))
-    print(f"validate-mc: {len(exact)} exact rows, {len(mc)} mc rows, {len(keys)} joined ({odir})")
+    print(f"\n[{label}] {len(exact)} exact rows, {len(mc)} rows, {len(keys)} joined")
     if not keys:
         return
     x_all = np.array([exact[k]["mean_reverse_kl"] for k in keys])
-    m_all = np.array([mc[k]["rkl_mc"] for k in keys])
+    m_all = np.array([mc[k][key] for k in keys])
     print(
         f"pooled: Spearman {_spearman(x_all, m_all):+.3f}  "
         f"exact mean {x_all.mean():.4f}  mc mean {m_all.mean():.4f}  "
@@ -321,7 +380,7 @@ def validate_mc(args) -> None:
         if len(ks) < 3:
             continue
         x = [exact[k]["mean_reverse_kl"] for k in ks]
-        m = [mc[k]["rkl_mc"] for k in ks]
+        m = [mc[k][key] for k in ks]
         rho = _spearman(x, m)
         if not np.isnan(rho):
             rhos.append(rho)
@@ -347,7 +406,7 @@ def validate_mc(args) -> None:
             print(
                 f"{label} (n={len(sel)}): exact mean "
                 f"{np.mean([exact[k]['mean_reverse_kl'] for k in sel]):.4f}  "
-                f"mc mean {np.mean([mc[k]['rkl_mc'] for k in sel]):.4f}"
+                f"{key} mean {np.mean([mc[k][key] for k in sel]):.4f}"
             )
 
 
