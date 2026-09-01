@@ -1,0 +1,32 @@
+# @package _global_
+# Run 1: correctness-bucket experiment (ADR 0005). Four arms, one per
+# correctness bucket of the question bank; 800 questions x 4 rollouts per
+# arm, all 4 trained (no trajectory selection), so the arms differ only in
+# question correctness. Regime (cap, steps, refresh cadence, LR) from
+# refresh_8k.yaml.
+#   python -m apod.driver +experiment=r1_correctness_8k
+defaults:
+  - refresh_8k
+  - _self_
+
+run_name: r1-correctness-8k
+
+driver:
+  arms:
+    teacher_right_student_wrong:
+      question_source: bank_bucket:teacher_right_student_wrong
+      selection: all_k
+    both_right:
+      question_source: bank_bucket:both_right
+      selection: all_k
+    both_wrong:
+      question_source: bank_bucket:both_wrong
+      selection: all_k
+    mixed:
+      question_source: bank_bucket:mixed
+      selection: all_k
+
+rollout:
+  num_rollouts: 4                # 4 per question, all trained
+selection:
+  k: 4                           # trajectories trained per question

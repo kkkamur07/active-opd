@@ -1,0 +1,37 @@
+# @package _global_
+# Run 2: trajectory-selection experiment (docs/decisions.md 2026-09-01).
+# 800 seeded OpenThoughts questions per arm (identical across arms), 12
+# rollouts per question, keep 4 by the arm's rule: entropy_top4 (student
+# trajectory entropy, entropy stage), kl_high / kl_mid / kl_low (exact
+# reverse-KL tertiles, scripts/oracle_kl.py) and random4, the no-selection
+# baseline (CONTEXT.md). Regime from refresh_8k.yaml.
+#   python -m apod.driver +experiment=r2_trajsel_8k
+defaults:
+  - refresh_8k
+  - _self_
+
+run_name: r2-trajsel-8k
+
+driver:
+  arms:
+    entropy_top4:
+      question_source: pool_random
+      selection: entropy_top_k
+    kl_high:
+      question_source: pool_random
+      selection: kl_high
+    kl_mid:
+      question_source: pool_random
+      selection: kl_mid
+    kl_low:
+      question_source: pool_random
+      selection: kl_low
+    random4:
+      question_source: pool_random
+      selection: random_k
+  kl_estimator: exact
+
+rollout:
+  num_rollouts: 12               # 3 tertiles of 4
+selection:
+  k: 4

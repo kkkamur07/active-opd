@@ -1,0 +1,26 @@
+# @package _global_
+# Run 3: question-level uncertainty sampling (docs/decisions.md 2026-09-01).
+# Every banked question is scored by student question entropy H(q) (mean
+# trajectory entropy over its bank rollouts); uncertain_questions takes the
+# 800 most uncertain, random_questions 800 at random from the same
+# candidates. 4 rollouts each, all trained. Regime from refresh_8k.yaml.
+#   python -m apod.driver +experiment=r3_qentropy_8k
+defaults:
+  - refresh_8k
+  - _self_
+
+run_name: r3-qentropy-8k
+
+driver:
+  arms:
+    uncertain_questions:
+      question_source: bank_top_entropy
+      selection: all_k
+    random_questions:
+      question_source: bank_random
+      selection: all_k
+
+rollout:
+  num_rollouts: 4
+selection:
+  k: 4

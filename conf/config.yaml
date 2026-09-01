@@ -11,6 +11,7 @@ defaults:
   - eval: math500
   - selection: default
   - train: gkd
+  - driver
   - _self_
 
 # Run identity. All artifacts land under output_dir; re-running with the same
