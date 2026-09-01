@@ -3,6 +3,15 @@
 # checkpoint each round -- that rebuild IS the weight sync.
 gpu_memory_utilization: 0.90
 max_model_len: 24576             # prompt + 16384-token response with headroom
-# Auto chunk sizing targets this many concurrent sequences per engine; measured
-# sweet spot for A100 80GB at these lengths (pre-experiment sweep, 2026-08).
-target_concurrent_sequences: 128
+# Auto chunk sizing targets this many concurrent sequences per engine. 128 was
+# the pre-experiment sweet spot (A100 80GB, 2026-08) and is what the apod,
+# kl50 and kl50w runs used. vLLM 0.26's scheduler already admits
+# max_num_seqs=256 and the KV cache holds ~305 concurrent 16k-token requests
+# (docs/perf_review.md, finding 2), so 256 fills the slots the engine offers;
+# a 2B decode step is overhead-bound, so the larger batch costs well under
+# 2x per step. Going above 256 also needs max_num_seqs via build_llm(**extra).
+# Sampling is NOT bitwise identical across batch shapes (kernel reduction
+# order changes the draw; the per-request seeds fix the distribution, not
+# the sample), so this is a between-runs setting: never change it inside an
+# experiment, and note the value in the run notes like a sampling setting.
+target_concurrent_sequences: 256
