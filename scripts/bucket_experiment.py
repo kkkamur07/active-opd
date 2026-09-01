@@ -724,7 +724,8 @@ def drive_kl50() -> None:
         cfg.train.lr_scheduler_kwargs = {"min_lr_rate": 0.1}
         cfg.train.persist_optimizer = True
         OmegaConf.save(config=cfg, f=RUN_DIR / "resolved_config.yaml", resolve=True)
-        log("kl50w: warmup 2 + cosine_with_min_lr(min_lr_rate=0.1) per round, "
+        log(f"kl50w: warmup {cfg.train.warmup_steps} + "
+            "cosine_with_min_lr(min_lr_rate=0.1) per round, "
             "Adam state persisted across rounds")
     # Warmup history: a warmup_steps=2 + constant_with_warmup patch ran here
     # for the round-2 trains only (it did kill the Adam-reset restart spike:
