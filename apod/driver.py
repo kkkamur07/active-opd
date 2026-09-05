@@ -671,6 +671,21 @@ class Driver:
                 stale.unlink()
                 _log(f"[{arm}] pruned {stale}")
 
+    def prune_finished(self, arm: str) -> None:
+        """A finished arm keeps only its final weights: the optimizer state
+        and the penultimate checkpoint exist for resuming a train pass, and
+        there is none left (15 GB -> 3.8 GB per arm; r3 filled the disk)."""
+
+        last = self.budget.refreshes - 1  # the final refresh is eval-only
+        for old in range(last):
+            for weights in paths.checkpoint_dir(self.run_dir, arm, old).glob("*.safetensors"):
+                weights.unlink()
+                _log(f"[{arm}] pruned {weights}")
+        state = paths.checkpoint_dir(self.run_dir, arm, last) / "optimizer_state.pt"
+        if state.exists():
+            state.unlink()
+            _log(f"[{arm}] pruned {state}")
+
     # --- one refresh -----------------------------------------------------------
 
     def run_refresh(self, arm: str, refresh: int, questions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -777,6 +792,7 @@ class Driver:
             self.point_pool_at(arm)
             for refresh in range(b.refreshes + 1):
                 self.run_refresh(arm, refresh, questions)
+            self.prune_finished(arm)
         _log("all arms complete; rendering plots")
         from apod.plotting import plot_refresh_curves  # matplotlib Agg, no GPU
 

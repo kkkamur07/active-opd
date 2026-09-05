@@ -188,11 +188,11 @@ def _check_full_run(experiment: str, out: Path, bank_rows: list[dict]) -> None:
                 assert all(s["mean_reverse_kl"] is not None for s in selected)
             summary = json.loads((rdir / "train" / "summary.json").read_text())
             assert summary["global_step_offset"] == r * 10 and summary["steps"] == 10
-        # pruning: weights only for the newest 2 refreshes, one optimizer state.
+        # pruning: a finished arm keeps only its final weights, no optimizer state.
         with_weights = [r for r in range(10) if any(paths.checkpoint_dir(out, arm, r).glob("*.safetensors"))]
-        assert with_weights == [8, 9], with_weights
+        assert with_weights == [9], with_weights
         with_opt = [r for r in range(10) if (paths.checkpoint_dir(out, arm, r) / "optimizer_state.pt").exists()]
-        assert with_opt == [9], with_opt
+        assert with_opt == [], with_opt
         assert all((paths.checkpoint_dir(out, arm, r) / "config.json").exists() for r in range(10))
 
     # questions per arm.
