@@ -14,7 +14,7 @@ refresh_every: 10
 
 # Arms, run sequentially, in this order. Each: a question source and a
 # trajectory-selection rule (apod.selection.RULES). Experiment files fill it.
-#   question_source: pool_random | bank_bucket:<bucket> | bank_top_entropy | bank_random
+#   question_source: pool_random | bank_bucket:<bucket> | bank_top_entropy | bank_low_entropy | bank_random
 #   selection:       all_k | random_k | entropy_top_k | kl_high | kl_mid | kl_low
 arms: {}
 

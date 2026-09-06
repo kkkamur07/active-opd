@@ -71,7 +71,7 @@ except ImportError:  # pragma: no cover - depends on the merge state
     tracking = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-QUESTION_SOURCES = ("pool_random", "bank_bucket", "bank_top_entropy", "bank_random")
+QUESTION_SOURCES = ("pool_random", "bank_bucket", "bank_top_entropy", "bank_low_entropy", "bank_random")
 WALL_CLOCK_KEYS = ("rollout_eval_s", "entropy_s", "oracle_s", "train_s")
 
 
@@ -197,7 +197,7 @@ def parse_source(source: str) -> tuple[str, str]:
     if kind not in QUESTION_SOURCES or (kind == "bank_bucket") != bool(bucket):
         raise ValueError(
             f"unknown question source {source!r}; expected pool_random, bank_bucket:<bucket>, "
-            "bank_top_entropy or bank_random"
+            "bank_top_entropy, bank_low_entropy or bank_random"
         )
     return kind, bucket
 
@@ -212,6 +212,7 @@ def select_questions(
     bank_bucket:<b>    the first n bank questions in bucket b
     bank_top_entropy   the n highest question_entropy bank questions
                        (ties -> lower bank example_index)
+    bank_low_entropy   the n lowest (run 4, the reverse of run 3's rule)
     bank_random        the first n bank questions that have a
                        question_entropy -- the same candidates
                        bank_top_entropy ranks, so run 3's arms differ only
@@ -254,6 +255,8 @@ def select_questions(
         )
     if kind == "bank_top_entropy":
         chosen = sorted(candidates, key=lambda r: (-r["question_entropy"], r["example_index"]))[:n]
+    elif kind == "bank_low_entropy":
+        chosen = sorted(candidates, key=lambda r: (r["question_entropy"], r["example_index"]))[:n]
     else:
         chosen = candidates[:n]
     return [_from_bank(r) for r in chosen]

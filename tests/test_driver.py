@@ -35,7 +35,7 @@ from apod.driver import Driver, budget_from, compose_config, prepare_config, run
 from apod.selection import KL_TERTILES
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPERIMENTS = ("r1_correctness_8k", "r2_trajsel_8k", "r3_qentropy_8k")
+EXPERIMENTS = ("r1_correctness_8k", "r2_trajsel_8k", "r3_qentropy_8k", "r4_qentropy_low_8k")
 NUM_GPUS = 2
 
 
@@ -210,6 +210,10 @@ def _check_full_run(experiment: str, out: Path, bank_rows: list[dict]) -> None:
             chosen = {q["bank_example_index"] for q in questions}
             rest = [r["question_entropy"] for r in bank_rows if r["example_index"] not in chosen and r["question_entropy"] is not None]
             assert min(q["question_entropy"] for q in questions) >= max(rest)
+        if source == "bank_low_entropy":
+            chosen = {q["bank_example_index"] for q in questions}
+            rest = [r["question_entropy"] for r in bank_rows if r["example_index"] not in chosen and r["question_entropy"] is not None]
+            assert max(q["question_entropy"] for q in questions) <= min(rest)
         if source == "bank_random":
             assert all(q["question_entropy"] is not None for q in questions)
     if experiment == "r2_trajsel_8k":

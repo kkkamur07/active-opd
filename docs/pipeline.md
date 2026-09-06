@@ -379,6 +379,7 @@ persisted, keep-last-2 weights):
 | `r1_correctness_8k` | `r1-correctness-8k` | `teacher_right_student_wrong`, `both_right`, `both_wrong`, `mixed`: `bank_bucket:<arm>` / `all_k` | 4, all trained |
 | `r2_trajsel_8k` | `r2-trajsel-8k` | `entropy_top4` (`entropy_top_k`), `kl_high`, `kl_mid`, `kl_low`, `random4` (`random_k`): all `pool_random` | 12, keep 4 |
 | `r3_qentropy_8k` | `r3-qentropy-8k` | `uncertain_questions` (`bank_top_entropy`), `random_questions` (`bank_random`): `all_k` | 4, all trained |
+| `r4_qentropy_low_8k` | `r4-qentropy-low-8k` | `certain_questions` (`bank_low_entropy`, the 800 lowest H(q)); control = r3's `random_questions` |
 
 Per arm (sequential, in `driver.arms` order), refresh r at step
 `r * refresh_every`:

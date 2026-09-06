@@ -1,0 +1,23 @@
+# @package _global_
+# Run 4: the reverse of run 3's question rule (USER 2026-09-06: "if entropy
+# selection is hurting try reverse entropy selection"). certain_questions
+# takes the 800 LOWEST student question-entropy H(q) bank questions; the
+# control is run 3's random_questions arm (same bank, regime, base student
+# and eval problems), not re-run. 4 rollouts each, all trained.
+#   python -m apod.driver +experiment=r4_qentropy_low_8k
+defaults:
+  - refresh_8k
+  - _self_
+
+run_name: r4-qentropy-low-8k
+
+driver:
+  arms:
+    certain_questions:
+      question_source: bank_low_entropy
+      selection: all_k
+
+rollout:
+  num_rollouts: 4
+selection:
+  k: 4
