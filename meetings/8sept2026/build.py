@@ -112,7 +112,7 @@ S.append(f"""<section class="slide">{mast(5,"Configs")}
 # 5 rollout selection: kl50 only
 S.append(f"""<section class="slide">{mast(6,"Rollout selection")}
 <div class="slide-eyebrow reveal d1">Result &middot; rollout selection, 12 keep 4</div>
-<h2 class="reveal d2" style="margin-bottom:22px;">Rollout selection</h2>
+<h2 class="reveal d2" style="margin-bottom:22px;">Rollout selection by <em>distribution overlap</em></h2>
 <div class="res-grid">
 <div class="panel emph reveal d3"><h4 class="a">kl50 &middot; 50 training steps</h4>{img("chart_kl50")}</div>
 <div class="panel reveal d4"><h4>Best avg@4 / best pass@4 (step in brackets)</h4><table class="gap-table" style="font-size:17px;"><thead><tr><th>arm</th><th>avg@4</th><th>pass@4</th></tr></thead><tbody>
