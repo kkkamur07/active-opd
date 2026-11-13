@@ -163,6 +163,16 @@ def load_examples(
     split: str | None = None,
 ) -> list[dict[str, Any]]:
 
+    if dataset == "otval200":
+        # Held-out OpenThoughts validation set (2026-11-13; LR sweep and
+        # checkpoint choice, never a reported result): the LAST n questions
+        # of the bank's pool order (seed-42 shuffle of every usable row,
+        # apod.bank.pool_examples). Banks sweep only the first
+        # student_questions (14,500 of 29,427) of that order, so these are
+        # never a training question. Fixed set: independent of `seed`.
+        usable = usable_examples(_load_rows("openthoughts", split), "openthoughts")
+        random.Random(42).shuffle(usable)
+        return usable[-n:]
     parts = COMBINED.get(dataset, (dataset,))
     usable = [ex for part in parts for ex in usable_examples(_load_rows(part, split), part)]
     return _sample(usable, n, dataset, seed)

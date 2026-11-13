@@ -23,8 +23,13 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
-RULES = ("all_k", "random_k", "entropy_top_k", "kl_high", "kl_mid", "kl_low")
+RULES = ("all_k", "random_k", "entropy_top_k", "kl_high", "kl_mid", "kl_low", "qkl_high", "qkl_mid", "qkl_low")
 KL_TERTILES = ("kl_high", "kl_mid", "kl_low")
+# Question-level selection (2026-11-13): each question's KL = mean exact reverse KL
+# of its rollouts; questions ranked descending, cut into thirds; the arm keeps
+# EVERY rollout of the questions in its third (k must equal num_rollouts and the
+# driver over-samples questions 3x: driver.question_oversample=3).
+QKL_TERTILES = ("qkl_high", "qkl_mid", "qkl_low")
 LEGACY_RULES = {"entropy_top4": "entropy_top_k", "random_top4": "random_k", "all": "all_k"}
 ARMS = tuple(LEGACY_RULES) + RULES
 
@@ -43,7 +48,11 @@ def needs_entropy(arm: str) -> bool:
 
 
 def needs_reverse_kl(arm: str) -> bool:
-    return canonical_rule(arm) in KL_TERTILES
+    return canonical_rule(arm) in KL_TERTILES + QKL_TERTILES
+
+
+def is_question_rule(arm: str) -> bool:
+    return canonical_rule(arm) in QKL_TERTILES
 
 
 def _selected_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +104,27 @@ def select_trajectories(
     by_example: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in trajectories:
         by_example[row["example_index"]].append(row)
+
+    if rule in QKL_TERTILES:
+        if k != num_rollouts:
+            raise ValueError(f"rule {rule!r} keeps every rollout of a question: k={k} must equal num_rollouts={num_rollouts}")
+        if len(by_example) % 3:
+            raise ValueError(f"rule {rule!r}: {len(by_example)} questions is not a multiple of 3")
+        question_kl = {}
+        for example_index, rows in by_example.items():
+            _require_score(rows, "mean_reverse_kl", rule, example_index)
+            question_kl[example_index] = float(np.mean([r["mean_reverse_kl"] for r in rows]))
+        ranked = sorted(by_example, key=lambda e: (-question_kl[e], e))
+        third = len(ranked) // 3
+        tertile = QKL_TERTILES.index(rule)
+        keep = sorted(ranked[tertile * third : (tertile + 1) * third])
+        out = []
+        for example_index in keep:
+            for r in sorted(by_example[example_index], key=lambda r: r["rollout_index"]):
+                row = _selected_row(r)
+                row["question_kl"] = question_kl[example_index]
+                out.append(row)
+        return out
 
     selected: list[dict[str, Any]] = []
     for example_index in sorted(by_example):

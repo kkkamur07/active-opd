@@ -315,6 +315,9 @@ class EvalWriter:
         protocol = cfg.eval if protocol is None else protocol
         self.name = str(protocol.dataset)
         self.num_samples = int(protocol.num_samples)
+        # Optional eval-only cap (2026-11-13: train/rollout cap 8192, eval cap
+        # 16384). Absent -> the shared sampling.max_new_tokens.
+        self.max_tokens = protocol.get("max_new_tokens") if hasattr(protocol, "get") else None
         self.seed_base = (
             int(cfg.seed) + int(protocol.eval_seed_offset) + args.round_index * int(protocol.num_problems)
         )
@@ -330,6 +333,8 @@ class EvalWriter:
 
     def requests(self, tokenizer) -> list[tuple[str, Any]]:
         sampling = _sampling_kwargs(self.cfg)
+        if self.max_tokens is not None:
+            sampling["max_tokens"] = int(self.max_tokens)
         return [
             (
                 render_prompt(tokenizer, ex["prompt"], enable_thinking=bool(self.cfg.model.enable_thinking)),
@@ -535,10 +540,19 @@ def run_session(llm, tokenizer, cfg, writers, graders, memory: GpuMemoryProbe) -
         for key, (text, params) in enumerate(writer.requests(tokenizer)):
             requests.append((text, params, writer, key))
     total_sequences = sum(int(params.n) for _, params, _, _ in requests)
+    # Sequences per llm.generate call. Default = the engine concurrency (the
+    # old behaviour), which drains the engine to its slowest sequence at
+    # EVERY chunk boundary (measured 2026-11-13 on 4B at a 16k cap: one shard
+    # at 107/256 running and 2.2k vs 6.4k tok/s in a chunk tail).
+    # engine.chunk_sequences >> concurrency keeps vLLM's slots full from its
+    # own queue; the tail happens once per call. Requests, seeds and outputs
+    # are unchanged (per-request SamplingParams); only durability per call
+    # and grading overlap granularity change.
+    chunk_budget = int(cfg.engine.get("chunk_sequences") or cfg.engine.target_concurrent_sequences)
     chunks = generate_requests_vllm(
         llm,
         [(text, params) for text, params, _, _ in requests],
-        chunk_budget=int(cfg.engine.target_concurrent_sequences),
+        chunk_budget=chunk_budget,
     )
     started = time.monotonic()
     throughput: dict[str, Any] = {}

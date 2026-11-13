@@ -88,6 +88,12 @@ def _clear_launches(out: Path) -> None:
     (out / "dry_run_launches.jsonl").unlink(missing_ok=True)
 
 
+def ids_of(out: Path, arm: str, refresh: int) -> list[str]:
+    """(id, example_index) of an arm's questions in one refresh block."""
+
+    return [(q["id"], q["example_index"]) for q in read_jsonl(out / "pool" / f"questions_{arm}.jsonl") if q["round"] == refresh]
+
+
 def _flag(cmd: list[str], flag: str) -> str:
     return cmd[cmd.index(flag) + 1]
 
@@ -167,7 +173,13 @@ def _check_full_run(experiment: str, out: Path, bank_rows: list[dict]) -> None:
         sessions = [l for l in mine if _stage(l["cmd"]) == "rollout_eval"]
         rollouts = [l for l in sessions if "--eval-only" not in l["cmd"]]
         finals = [l for l in sessions if "--eval-only" in l["cmd"]]
-        assert len(rollouts) == 10 * NUM_GPUS and len(finals) == 1 * NUM_GPUS
+        # Step-0 rollouts (and scores) are shared between arms with identical
+        # step-0 questions (2026-11-13): such an arm skips the step-0 launch.
+        reused0 = (paths.round_dir(out, arm, 0) / "rollouts" / "reused_from.json").exists()
+        assert len(rollouts) == (9 if reused0 else 10) * NUM_GPUS and len(finals) == 1 * NUM_GPUS
+        if reused0:
+            src = json.loads((paths.round_dir(out, arm, 0) / "rollouts" / "reused_from.json").read_text())["arm"]
+            assert ids_of(out, src, 0) == ids_of(out, arm, 0)
         # MATH-500 and AIME in the SAME session at every refresh incl. the
         # final (never a second launch); step-0 evals reused from the first arm.
         for l in sessions:

@@ -63,7 +63,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 
 from apod import paths
 from apod.datasets.io import read_jsonl, read_shards, write_jsonl
-from apod.selection import canonical_rule, needs_entropy, needs_reverse_kl, select_trajectories
+from apod.selection import canonical_rule, is_question_rule, needs_entropy, needs_reverse_kl, select_trajectories
 
 try:  # per-step diagnostics + W&B (sibling module); the loop runs without it
     from apod import tracking
@@ -71,7 +71,7 @@ except ImportError:  # pragma: no cover - depends on the merge state
     tracking = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-QUESTION_SOURCES = ("pool_random", "bank_bucket", "bank_top_entropy", "bank_low_entropy", "bank_random")
+QUESTION_SOURCES = ("pool_random", "bank_bucket", "bank_top_entropy", "bank_low_entropy", "bank_random", "bank_labelled")
 WALL_CLOCK_KEYS = ("rollout_eval_s", "entropy_s", "oracle_s", "train_s")
 
 
@@ -93,6 +93,10 @@ class Budget:
     effective_batch: int
     k: int  # trajectories trained per question (selection.k)
     num_rollouts: int
+    # Questions generated per refresh = oversample x questions trained. 1 for
+    # rollout selection; 3 for question-level (qkl_*) selection, which keeps
+    # one third of the questions with all their rollouts (2026-11-13).
+    question_oversample: int = 1
 
     @property
     def refreshes(self) -> int:
@@ -104,7 +108,7 @@ class Budget:
 
     @property
     def questions_per_refresh(self) -> int:
-        return self.trajectories_per_refresh // self.k
+        return self.trajectories_per_refresh // self.k * self.question_oversample
 
     @property
     def num_questions(self) -> int:
@@ -118,6 +122,7 @@ def budget_from(cfg: DictConfig) -> Budget:
         effective_batch=int(cfg.train.effective_batch),
         k=int(cfg.selection.k),
         num_rollouts=int(cfg.rollout.num_rollouts),
+        question_oversample=int(cfg.driver.get("question_oversample", 1)),
     )
     if b.steps_total % b.refresh_every:
         raise ValueError(f"steps_total {b.steps_total} is not a multiple of refresh_every {b.refresh_every}")
@@ -203,7 +208,8 @@ def parse_source(source: str) -> tuple[str, str]:
 
 
 def select_questions(
-    source: str, *, n: int, seed: int, bank_dir: Path, dry_run: bool, data_cfg: DictConfig | None = None
+    source: str, *, n: int, seed: int, bank_dir: Path, dry_run: bool, data_cfg: DictConfig | None = None,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """The arm's n questions under ``source`` (conf/driver.yaml).
 
@@ -246,8 +252,16 @@ def select_questions(
         if bucket not in bank.BUCKETS:
             raise ValueError(f"question source {source!r}: unknown correctness bucket; expected one of {bank.BUCKETS}")
         candidates = bank.bucket_questions(rows, bucket)
+    elif kind == "bank_labelled":
+        # Every teacher-labelled bank question, in pool order: the ONE shared
+        # pool of the 2026-11-13 design (random control, KL arms, QKL arms and
+        # the correctness buckets all draw from it).
+        candidates = [r for r in rows if r.get("teacher_label") is not None]
     else:
         candidates = [r for r in rows if r.get("question_entropy") is not None]
+    # driver.question_offset: skip the first `offset` candidates (fresh
+    # questions for a later seed without re-ordering the bank).
+    candidates = candidates[offset:]
     if len(candidates) < n:
         raise ValueError(
             f"question source {source!r}: {len(candidates)} candidate questions in {bank_dir} "
@@ -338,15 +352,27 @@ class Driver:
         self.num_gpus = int(cfg.num_gpus)
         self.dry_run = bool(cfg.driver.dry_run)
         self.resume = bool(cfg.resume)
-        self.arms: dict[str, dict[str, str]] = {
-            str(name): {"question_source": str(spec.question_source), "selection": str(spec.selection)}
+        self.arms: dict[str, dict[str, Any]] = {
+            str(name): {
+                "question_source": str(spec.question_source),
+                "selection": str(spec.selection),
+                "learning_rate": (float(spec.learning_rate) if spec.get("learning_rate") is not None else None),
+            }
             for name, spec in cfg.driver.arms.items()
         }
         if not self.arms:
             raise ValueError("cfg.driver.arms is empty; pick an experiment (+experiment=r1_correctness_8k)")
-        for spec in self.arms.values():  # a typo must fail before any GPU work
+        for name, spec in self.arms.items():  # a typo must fail before any GPU work
             canonical_rule(spec["selection"])
             parse_source(spec["question_source"])
+            if is_question_rule(spec["selection"]) != (self.budget.question_oversample == 3):
+                raise ValueError(
+                    f"arm {name}: rule {spec['selection']} with driver.question_oversample="
+                    f"{self.budget.question_oversample}; qkl_* rules need 3, every other rule 1 (separate run dirs)"
+                )
+        self.score_all = bool(cfg.driver.get("score_all", False))
+        self.keep_all_weights = bool(cfg.driver.get("keep_all_weights", False))
+        self.step0_eval_from = cfg.driver.get("step0_eval_from")
         self.monitor_sets = [str(s) for s in cfg.driver.monitor_sets]
         self.metrics = MetricsFile(run_dir / "metrics.jsonl", list(self.arms))
 
@@ -427,6 +453,7 @@ class Driver:
             bank_dir=Path(str(self.cfg.driver.bank_dir)),
             dry_run=self.dry_run,
             data_cfg=self.cfg.data,
+            offset=int(self.cfg.driver.get("question_offset", 0)),
         )
         rows = []
         for i, q in enumerate(questions):
@@ -494,6 +521,22 @@ class Driver:
         dst = paths.round_dir(self.run_dir, arm, 0) / subdir
         if self.markers_present(dst):
             return
+        if self.step0_eval_from and subdir == "eval":
+            # A base-model eval finished elsewhere (same eval set, same seeds,
+            # same cap): copy it into every run instead of regenerating.
+            src = Path(str(self.step0_eval_from))
+            rows = read_shards(src, "eval.shard*.jsonl")
+            if len(rows) == expected_rows:
+                dst.mkdir(parents=True, exist_ok=True)
+                for i, f in enumerate(sorted(src.glob("eval.shard*.jsonl"))):
+                    shutil.copy2(f, dst / f.name)
+                for k in range(self.num_gpus):
+                    (dst / f"done.shard{k}").touch()
+                if len(list(src.glob("eval.shard*.jsonl"))) > self.num_gpus:
+                    raise RuntimeError(f"{src} has more eval shards than num_gpus={self.num_gpus}")
+                (dst / "reused_from.json").write_text(json.dumps({"path": str(src), "reason": "step 0 = base model"}) + "\n")
+                _log(f"[{arm}] step-0 {subdir} reused from {src}")
+                return
         for other in self.arms:
             src = paths.round_dir(self.run_dir, other, 0) / subdir
             if other == arm or not self.markers_present(src):
@@ -506,6 +549,56 @@ class Driver:
                 shutil.copy2(f, dst / f.name)
             (dst / "reused_from.json").write_text(json.dumps({"arm": other, "reason": "step 0 = base model"}) + "\n")
             _log(f"[{arm}] step-0 {subdir} reused from arm {other}")
+            return
+
+    def reuse_step0_rollouts(self, arm: str, questions: list[dict[str, Any]]) -> None:
+        """Step 0 rolls out the identical base model on (possibly) identical
+        questions: when an earlier arm of this run has the same refresh-0
+        question ids and finished rollouts, copy its rollouts (tokens
+        symlinked) and any finished entropy/oracle scores instead of
+        regenerating and rescoring (paired design: every rollout-selection
+        arm picks from ONE shared pool at step 0). Seeds are deterministic, so
+        this is what regeneration would produce, minus vLLM nondeterminism."""
+
+        dst = paths.round_dir(self.run_dir, arm, 0)
+        if self.markers_present(dst / "rollouts"):
+            return
+        ids = {q["id"] for q in questions if q["round"] == 0}
+        # Candidates: earlier arms of this run, then any arm of the run dirs in
+        # driver.step0_rollouts_from (e.g. the LR sweep, whose step-0 pool is
+        # this run's: same base model, questions, seeds and cap).
+        candidates = [(self.run_dir, other) for other in self.arms if other != arm]
+        for ext in self.cfg.driver.get("step0_rollouts_from") or []:
+            ext_dir = Path(str(ext))
+            ext_dir = ext_dir if ext_dir.is_absolute() else REPO_ROOT / ext_dir
+            for qf in sorted((ext_dir / "pool").glob("questions_*.jsonl")):
+                candidates.append((ext_dir, qf.stem.removeprefix("questions_")))
+        for run_dir, other in candidates:
+            src = paths.round_dir(run_dir, other, 0)
+            if not self.markers_present(src / "rollouts"):
+                continue
+            qfile = run_dir / "pool" / f"questions_{other}.jsonl"
+            other_q = read_jsonl(qfile) if qfile.exists() else []
+            if {q["id"] for q in other_q if q["round"] == 0} != ids:
+                continue
+            other_rows = {q["id"]: q["example_index"] for q in other_q if q["round"] == 0}
+            mine = {q["id"]: q["example_index"] for q in questions if q["round"] == 0}
+            if other_rows != mine:
+                continue  # same ids but different example_index -> files would not line up
+            (dst / "rollouts").mkdir(parents=True, exist_ok=True)
+            for f in src.joinpath("rollouts").iterdir():
+                if f.name == "tokens":
+                    continue
+                shutil.copy2(f, dst / "rollouts" / f.name)
+            tokens = dst / "rollouts" / "tokens"
+            if not tokens.exists():
+                tokens.symlink_to((src / "rollouts" / "tokens").resolve())
+            for stage in ("entropy", "oracle"):
+                if (src / stage).is_dir() and (stage == "oracle" or self.markers_present(src / stage)):
+                    if not (dst / stage).exists():
+                        shutil.copytree(src / stage, dst / stage)
+            (dst / "rollouts" / "reused_from.json").write_text(json.dumps({"arm": other, "run_dir": str(run_dir)}) + "\n")
+            _log(f"[{arm}] step-0 rollouts (+ scores) reused from {run_dir.name}/{other}")
             return
 
     def run_rollout_eval(self, arm: str, refresh: int, *, eval_only: bool) -> float | None:
@@ -611,12 +704,12 @@ class Driver:
         path = rdir / "selected" / "selected.jsonl"
         if self.resume and path.exists():
             return read_jsonl(path)
-        if needs_entropy(rule):
+        if needs_entropy(rule) or (self.score_all and (rdir / "entropy").is_dir()):
             scores = {(r["example_index"], r["rollout_index"]): r for r in read_shards(rdir / "entropy", "entropy.shard*.jsonl")}
             for t in trajectories:
                 scored = scores.get((t["example_index"], t["rollout_index"]))
                 t["entropy"] = scored["entropy"] if scored else None
-        if needs_reverse_kl(rule):
+        if needs_reverse_kl(rule) or (self.score_all and (rdir / "oracle").is_dir()):
             key = "rkl_mc" if str(self.cfg.driver.kl_estimator) == "mc" else "mean_reverse_kl"
             scores = self.oracle_rows(rdir)
             for t in trajectories:
@@ -646,6 +739,8 @@ class Driver:
         # LR schedule (train.total_training_steps, warmup once at step 0)
         # from there and puts its per-step diagnostics on the run's step axis.
         args = ["--run-dir", str(self.run_dir), "--arm", arm, "--round", str(refresh), "--global-step-offset", str(step)]
+        if self.arms[arm]["learning_rate"] is not None:
+            args += ["--lr", repr(self.arms[arm]["learning_rate"])]
         if self.num_gpus > 1:
             cmd = [sys.executable, "-m", "torch.distributed.run", "--standalone",
                    f"--nproc_per_node={self.num_gpus}", "-m", "apod.stages.train", *args]
@@ -664,7 +759,7 @@ class Driver:
         newest optimizer state (the previous one was consumed by this train)."""
 
         keep = int(self.cfg.keep_checkpoints)
-        for old in range(refresh - keep + 1):
+        for old in range(0 if self.keep_all_weights else refresh - keep + 1):
             for weights in paths.checkpoint_dir(self.run_dir, arm, old).glob("*.safetensors"):
                 weights.unlink()
                 _log(f"[{arm}] pruned {weights}")
@@ -680,7 +775,7 @@ class Driver:
         there is none left (15 GB -> 3.8 GB per arm; r3 filled the disk)."""
 
         last = self.budget.refreshes - 1  # the final refresh is eval-only
-        for old in range(last):
+        for old in range(0 if self.keep_all_weights else last):
             for weights in paths.checkpoint_dir(self.run_dir, arm, old).glob("*.safetensors"):
                 weights.unlink()
                 _log(f"[{arm}] pruned {weights}")
@@ -701,6 +796,8 @@ class Driver:
 
         # 1 + 2: eval on cfg.eval and the monitor sets + this refresh's
         # rollouts, one engine session.
+        if refresh == 0:
+            self.reuse_step0_rollouts(arm, questions)
         wall["rollout_eval_s"] = self.run_rollout_eval(arm, refresh, eval_only=final)
         evals = {}
         for name in [None, *self.monitor_sets]:
@@ -724,9 +821,12 @@ class Driver:
         # 3: score + select.
         trajectories = self.verify_rollouts(arm, refresh, questions)
         rule = self.arms[arm]["selection"]
-        if needs_entropy(rule):
+        # score_all: every arm gets entropy AND exact reverse KL on every
+        # rollout (logging + the overlap/QKL-vs-pass-rate analyses), not only
+        # what its rule needs.
+        if needs_entropy(rule) or self.score_all:
             wall["entropy_s"] = self.run_entropy(arm, refresh)
-        if needs_reverse_kl(rule):
+        if needs_reverse_kl(rule) or self.score_all:
             wall["oracle_s"] = self.run_oracle(arm, refresh, expected=len(trajectories))
         selected = self.select(arm, refresh, trajectories)
 

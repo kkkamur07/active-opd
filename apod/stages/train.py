@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
         help="training steps the arm took before this launch; per-step W&B rows "
              "are logged at offset + trainer step so refreshes share one x-axis",
     )
+    parser.add_argument(
+        "--lr", type=float, default=None,
+        help="peak learning rate override for this arm (driver arm spec learning_rate; LR sweeps)",
+    )
     return parse_stage_args(parser)
 
 
@@ -520,7 +524,7 @@ def main() -> None:
         output_dir=str(train_dir / "hf"),
         beta=float(tc.beta),
         lmbda=float(tc.lmbda),
-        learning_rate=float(tc.learning_rate),
+        learning_rate=float(args.lr if args.lr is not None else tc.learning_rate),
         lr_scheduler_type=str(tc.lr_scheduler_type),
         # >= 1: steps; < 1: fraction of the schedule length (transformers
         # 5.x), which is total_training_steps when that is set.
