@@ -13,6 +13,7 @@ defaults:
 run_name: p4b-rollout-s1
 
 driver:
+  bank_dir: outputs/runs/bank-8k   # teacher labels only (bank_labelled): identical in the 2B bank; correctness arms use bank-8k-4b
   step0_rollouts_from: [outputs/runs/p4b-lr]   # the LR sweep generated this exact step-0 pool
   arms:
     random:

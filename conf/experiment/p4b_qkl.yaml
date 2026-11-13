@@ -11,6 +11,7 @@ defaults:
 run_name: p4b-qkl-s1
 
 driver:
+  bank_dir: outputs/runs/bank-8k   # teacher labels only (bank_labelled): identical in the 2B bank; correctness arms use bank-8k-4b
   question_oversample: 3
   arms:
     qkl_mid:
