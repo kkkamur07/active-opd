@@ -31,7 +31,7 @@ sampling:
 engine:
   max_model_len: 16384           # 8192 tokens + prompt
   gpu_memory_utilization: 0.92
-  target_concurrent_sequences: 192   # vLLM max_num_seqs: 1.76M-token KV/GPU; 192 x (8.4k + 0.5k state page) fits the worst case at 8k (256 thrashed at 16k)
+  target_concurrent_sequences: 224   # vLLM max_num_seqs. Measured at 8k: 160 seqs -> 47% of the 1.76M-token KV cache, so 224 -> ~66% typical (256 thrashed at 16k)
   chunk_sequences: 1024          # requests per llm.generate call: no per-256 drain (rollout_eval.run_session)
 
 train:
