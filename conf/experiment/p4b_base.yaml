@@ -3,12 +3,12 @@
 # 2026-11-13). Not runnable alone (no arms); the p4b_* experiment files add arms.
 #
 # Student Qwen3.5-4B, teacher Qwen3.5-9B, bf16. Rollouts and training at cap
-# 8192; MATH-500 eval at 16384. 60 training steps = 4 refreshes x 15 steps at
+# 8192; MATH-500 eval at 8192 (USER 2026-11-13). 60 training steps = 4 refreshes x 15 steps at
 # effective batch 32 (480 trained rollouts per refresh); a final eval at step 60.
 # One question pool for every arm: the teacher-labelled questions of the 4B
 # bank (bank-8k-4b: 9B teacher labels of bank-8k + base-4B student labels).
 defaults:
-  - override /eval: math500_16k
+  - override /eval: math500_8k
   - _self_
 
 model:
@@ -21,7 +21,7 @@ driver:
   bank_dir: outputs/runs/bank-8k-4b
   score_all: true                # entropy + exact reverse KL on EVERY rollout of every arm
   keep_all_weights: true         # every refresh checkpoint kept (AIME later, best-checkpoint choice)
-  step0_eval_from: outputs/runs/p0-4b-base16k/arms/base/rounds/round_00/eval
+  step0_eval_from: outputs/runs/p0-4b-base8k/arms/base/rounds/round_00/eval
   question_offset: 0             # fresh questions per seed: seed s uses a different offset
 
 keep_checkpoints: 5
@@ -29,9 +29,9 @@ keep_checkpoints: 5
 sampling:
   max_new_tokens: 8192
 engine:
-  max_model_len: 18432           # 16384 eval tokens + prompt
+  max_model_len: 16384           # 8192 tokens + prompt
   gpu_memory_utilization: 0.92
-  target_concurrent_sequences: 160   # vLLM max_num_seqs: 1.76M-token KV per GPU, ~9.1k tok in flight per seq at a 16k eval cap -> 160 avoids preemption thrash
+  target_concurrent_sequences: 192   # vLLM max_num_seqs: 1.76M-token KV/GPU; 192 x (8.4k + 0.5k state page) fits the worst case at 8k (256 thrashed at 16k)
   chunk_sequences: 1024          # requests per llm.generate call: no per-256 drain (rollout_eval.run_session)
 
 train:

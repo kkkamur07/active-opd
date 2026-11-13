@@ -7,4 +7,4 @@ num_problems: 200
 num_samples: 4
 intermediate_num_problems: 200
 eval_seed_offset: 200000
-max_new_tokens: 16384            # eval cap (rollouts/training stay at sampling.max_new_tokens)
+max_new_tokens: 8192             # USER 2026-11-13: eval cap = training cap
