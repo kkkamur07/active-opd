@@ -304,7 +304,12 @@ def write_selection(arm: str, rnd: int, oracle_dir: Path | None) -> None:
         elif arm == "random":
             # Control: random 4 of 12, re-sampled each round. Deterministic
             # seed per (round, example) so resume replays the same draw.
-            rng = random.Random(f"oracle16k-r{rnd}-e{example_index}")
+            # MidAlign-8k replicate seeds key the draw on the seed too, so
+            # each seed's control is an independent draw (old runs unchanged).
+            key = f"oracle16k-r{rnd}-e{example_index}"
+            if MIDALIGN_SEED is not None:
+                key += f"-s{MIDALIGN_SEED}"
+            rng = random.Random(key)
             picks = [pool[i] for i in sorted(rng.sample(range(NUM_ROLLOUTS), 4))]
         else:
             ranked = sorted(pool, key=lambda r: r["mean_reverse_kl"], reverse=True)
@@ -825,6 +830,132 @@ def drive_kl50() -> None:
     log("kl50 drive complete")
 
 
+# --- MidAlign-8k replicate seeds (2026-11-12) --------------------------------
+# Pre-registered replication of MidAlign-8k (kl50): identical regime (config
+# copied verbatim from kl50/resolved_config.yaml: cap 8192, constant LR 2e-5,
+# Adam reset per round, micro 8 x accum 2, 136 questions/round, 17 steps/round,
+# 3 rounds -> evals at steps 17/34/51), but a NEW seed that moves the question
+# draw, the rollout/eval sampling and the training seed. Questions exclude
+# kl50's pool, earlier replicate seeds, and any training row that overlaps a
+# MATH-500 problem (exact normalised match or a shared 13-gram). Design:
+# outputs/apod-replication-design.md.
+
+MIDALIGN_SEED: int | None = None
+MIDALIGN_PREFIX = "midalign8k-s"
+
+
+def _norm_words(text: str) -> list[str]:
+    # Drop the shared instruction suffix first: it is identical on train and
+    # eval prompts and would otherwise create false 13-gram matches.
+    text = str(text).split("Please reason step by step")[0]
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _build_midalign_pool(seed: int) -> None:
+    pool_path = RUN_DIR / "pool" / "prompts.jsonl"
+    if pool_path.exists():
+        log(f"pool exists: {pool_path}")
+        return
+    from apod.datasets.load import load_examples
+
+    need = TRAIN_ROUNDS * KL50_PROMPTS
+    excluded_ids = {r["id"] for r in read_jsonl(KL50_DIR / "pool" / "prompts.jsonl")}
+    for other in sorted(RUN_DIR.parent.glob(MIDALIGN_PREFIX + "*")):
+        p = other / "pool" / "prompts.jsonl"
+        if other != RUN_DIR and p.exists():
+            excluded_ids |= {r["id"] for r in read_jsonl(p)}
+    evals = read_jsonl(KL50_DIR / "pool" / "eval_problems.jsonl")
+    eval_text = [e.get("prompt") or e.get("problem") for e in evals]
+    assert all(eval_text), "eval_problems.jsonl rows need a prompt/problem field"
+    eval_exact = {" ".join(_norm_words(t)) for t in eval_text}
+    eval_13 = set()
+    for t in eval_text:
+        w = _norm_words(t)
+        eval_13 |= {" ".join(w[i:i + 13]) for i in range(len(w) - 12)}
+
+    def contaminated(prompt: str) -> bool:
+        w = _norm_words(prompt)
+        if " ".join(w) in eval_exact:
+            return True
+        return any(" ".join(w[i:i + 13]) in eval_13 for i in range(len(w) - 12))
+
+    examples = load_examples("openthoughts", n=need * 4, seed=seed)
+    rows, n_excl, n_contam = [], 0, 0
+    for ex in examples:
+        if ex["id"] in excluded_ids:
+            n_excl += 1
+            continue
+        if contaminated(ex["prompt"]):
+            n_contam += 1
+            continue
+        i = len(rows)
+        rows.append({"example_index": i, "id": ex["id"], "prompt": ex["prompt"],
+                     "reference": ex["answer"], "round": i // KL50_PROMPTS})
+        if len(rows) == need:
+            break
+    assert len(rows) == need, f"only {len(rows)} usable questions"
+    pool_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(KL50_DIR / "pool" / "eval_problems.jsonl", RUN_DIR / "pool" / "eval_problems.jsonl")
+    tmp = pool_path.with_suffix(".jsonl.tmp")
+    with tmp.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    os.replace(tmp, pool_path)
+    (RUN_DIR / "pool" / "pool_build.json").write_text(json.dumps(
+        {"seed": seed, "rows": need, "skipped_previously_used": n_excl,
+         "skipped_math500_overlap": n_contam}) + "\n")
+    log(f"pool: {need} questions (seed {seed}); skipped {n_excl} used, {n_contam} MATH-500 overlap")
+
+
+def _write_midalign_config(seed: int) -> None:
+    path = RUN_DIR / "resolved_config.yaml"
+    if path.exists():
+        return
+    cfg = OmegaConf.load(KL50_DIR / "resolved_config.yaml")
+    assert int(cfg.sampling.max_new_tokens) == 8192 and float(cfg.train.learning_rate) == 2e-5
+    assert cfg.train.lr_scheduler_type == "constant" and not cfg.train.get("persist_optimizer", False)
+    cfg.run_name = RUN_DIR.name
+    cfg.output_dir = str(RUN_DIR)
+    cfg.seed = seed
+    cfg.train.seed = seed
+    cfg.data.pool_seed = seed
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(config=cfg, f=path, resolve=True)
+    shutil.copy(KL50_DIR / "micro_probe.json", RUN_DIR / "micro_probe.json")
+    log(f"config: kl50 regime, seed {seed} -> {path}")
+
+
+def drive_midalign(seed: int) -> None:
+    _write_midalign_config(seed)
+    _build_midalign_pool(seed)
+    # Shared round 0: base rollouts (12 x 136) + base eval under THIS seed.
+    run_rollout_eval(RUN_DIR, ARMS[0], 0, eval_only=False)
+    for arm in ARMS[1:]:
+        _copy_shared_round0(ARMS[0], arm)
+    r0_oracle = arm_round(RUN_DIR, ARMS[0], 0) / "oracle"
+    run_score(arm_round(RUN_DIR, ARMS[0], 0) / "rollouts" / "tokens", r0_oracle,
+              checkpoint_path(ARMS[0], 0), expected=KL50_PROMPTS * NUM_ROLLOUTS)
+    for arm in ARMS:
+        write_selection(arm, 0, r0_oracle)
+    run_micro_probe(candidates=(8, 4), fallback=4)  # re-applies kl50's verdict
+    for rnd in range(TRAIN_ROUNDS):
+        for arm in ARMS:
+            run_train(arm, rnd)
+            prune_checkpoints(arm, rnd)  # keeps the newest 2: steps 34 and 51 survive
+        for arm in ARMS:
+            terminal = rnd + 1 == TRAIN_ROUNDS
+            run_rollout_eval(RUN_DIR, arm, rnd + 1, eval_only=terminal)
+            if not terminal:
+                oracle_dir = None
+                if arm in BUCKETS:
+                    oracle_dir = arm_round(RUN_DIR, arm, rnd + 1) / "oracle"
+                    run_score(arm_round(RUN_DIR, arm, rnd + 1) / "rollouts" / "tokens",
+                              oracle_dir, checkpoint_path(arm, rnd + 1),
+                              expected=KL50_PROMPTS * NUM_ROLLOUTS)
+                write_selection(arm, rnd + 1, oracle_dir)
+    log(f"midalign seed {seed} complete")
+
+
 def report() -> None:
     subprocess.run(
         [sys.executable, "scripts/eval_table.py", "--run-dir", str(RUN_DIR)],
@@ -857,6 +988,11 @@ def main() -> None:
                             "cycles, Adam state persisted across rounds, and "
                             "a probed peak LR; banks round 0 from kl50 "
                             "(USER 2026-09-01)")
+    group.add_argument("--midalign-seed", type=int, default=None,
+                       help="MidAlign-8k replicate at this seed (kl50 regime, "
+                            "fresh questions); arms via --arms")
+    parser.add_argument("--arms", default="kl_mid,random",
+                        help="comma list for --midalign-seed (default kl_mid,random)")
     parser.add_argument("--lr", type=float, default=None,
                         help="override train LR for this (re)launch, e.g. 5e-6 "
                              "for the round-3 extension per the probe verdict")
@@ -871,7 +1007,17 @@ def main() -> None:
     if args.eval_num_problems is not None:
         global EVAL_NUM_PROBLEMS
         EVAL_NUM_PROBLEMS = args.eval_num_problems
-    if args.kl50 or args.kl50w:
+    if args.midalign_seed is not None:
+        global MIDALIGN_SEED
+        MIDALIGN_SEED = args.midalign_seed
+        RUN_DIR = ROOT / f"outputs/runs/{MIDALIGN_PREFIX}{args.midalign_seed}"
+        CAP = 8192
+        TRAIN_ROUNDS = 3
+        ARMS = tuple(args.arms.split(","))
+        assert ARMS[0] in BUCKETS, "first arm must be KL-scored (it owns round-0 scoring)"
+        assert set(ARMS) <= set(BUCKETS) | {"random"}, ARMS
+        drive_midalign(args.midalign_seed)
+    elif args.kl50 or args.kl50w:
         RUN_DIR = KL50W_DIR if args.kl50w else KL50_DIR
         CAP = 8192
         TRAIN_ROUNDS = 3
