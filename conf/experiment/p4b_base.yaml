@@ -31,8 +31,8 @@ sampling:
 engine:
   max_model_len: 18432           # 16384 eval tokens + prompt
   gpu_memory_utilization: 0.92
-  target_concurrent_sequences: 256   # vLLM max_num_seqs
-  chunk_sequences: 4096          # requests per llm.generate call: no per-256 drain (rollout_eval.run_session)
+  target_concurrent_sequences: 160   # vLLM max_num_seqs: 1.76M-token KV per GPU, ~9.1k tok in flight per seq at a 16k eval cap -> 160 avoids preemption thrash
+  chunk_sequences: 1024          # requests per llm.generate call: no per-256 drain (rollout_eval.run_session)
 
 train:
   max_length: 16384

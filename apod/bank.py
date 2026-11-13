@@ -343,6 +343,7 @@ def run_sweep(bank_dir: Path, cfg, model: str, chunk: int, shard: int, num_shard
         gpu_memory_utilization=float(cfg.engine.gpu_memory_utilization),
         seed=int(cfg.seed),
         fast_presence_penalty=bool(cfg.sampling.fast_presence_penalty),
+        max_num_seqs=int(cfg.engine.target_concurrent_sequences),
     )
     tokenizer = llm.get_tokenizer()
     args = SimpleNamespace(shard=shard, round_index=chunk)

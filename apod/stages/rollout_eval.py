@@ -712,7 +712,10 @@ def main(argv: list[str] | None = None) -> int:
         # vLLM admits max_num_seqs=256 by default; a larger concurrency
         # target only fills the engine if that ceiling moves with it.
         concurrency = int(cfg.engine.target_concurrent_sequences)
-        engine_extra = {"max_num_seqs": concurrency} if concurrency > 256 else {}
+        # Always pass it (2026-11-13): a target BELOW 256 is how a long-cap
+        # eval avoids KV-cache preemption thrash (4B at 16k: 99.9% KV, 1.5-2.3k
+        # vs 5.3k tok/s), and it was silently ignored when only >256 passed.
+        engine_extra = {"max_num_seqs": concurrency}
         llm = build_llm(
             model_path,
             max_model_len=int(cfg.engine.max_model_len),

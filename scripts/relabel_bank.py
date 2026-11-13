@@ -39,7 +39,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from apod import bank  # noqa: E402
 
 
-def prepare(src: Path, dst: Path, student: str) -> list[int]:
+def prepare(src: Path, dst: Path, student: str, limit: int | None = None) -> list[int]:
     dst.mkdir(parents=True, exist_ok=True)
     if not (dst / "pool").exists():
         shutil.copytree(src / "pool", dst / "pool")
@@ -53,11 +53,22 @@ def prepare(src: Path, dst: Path, student: str) -> list[int]:
         cfg.bank.dir = str(dst.resolve())
         cfg.run_name = dst.name
         cfg.output_dir = str(dst.resolve())
-        cfg.engine.target_concurrent_sequences = 256
+        cfg.engine.target_concurrent_sequences = 192  # 1.76M-token KV per GPU: 192 x (8.4k + 0.5k state page) fits worst case at the 8k cap
         cfg.engine.chunk_sequences = 4096   # one long generate stream (no per-chunk drain)
         OmegaConf.save(config=cfg, f=path, resolve=True)
     rows = bank.load_bank(src)
-    indices = sorted(int(r["example_index"]) for r in rows if r["teacher_label"] is not None)
+    labelled = [r for r in rows if r["teacher_label"] is not None]
+    if limit is None:
+        indices = sorted(int(r["example_index"]) for r in labelled)
+    else:
+        # Every teacher-CORRECT question (the only source of the rarest bucket,
+        # teacher_right_student_wrong, and of both_right) plus the first
+        # `limit` other teacher-labelled questions in pool order (both_wrong
+        # and mixed fill from far fewer). Raise `limit` later if a bucket is
+        # short: resume keeps every finished question.
+        c = [int(r["example_index"]) for r in labelled if r["teacher_label"] == "C"]
+        other = [int(r["example_index"]) for r in labelled if r["teacher_label"] != "C"][:limit]
+        indices = sorted(c + other)
     (dst / "relabel_indices.json").write_text(json.dumps({"src": str(src), "student": student, "example_indices": indices}))
     return indices
 
@@ -84,6 +95,7 @@ def main() -> None:
     p.add_argument("--dst", type=Path, required=True)
     p.add_argument("--student", default="Qwen/Qwen3.5-4B")
     p.add_argument("--gpus", default="0,1")
+    p.add_argument("--limit", type=int, default=None, help="relabel every teacher-correct question + the first N other teacher-labelled ones")
     p.add_argument("--worker", action="store_true")
     p.add_argument("--label", action="store_true")
     p.add_argument("--shard", type=int, default=0)
@@ -93,7 +105,7 @@ def main() -> None:
         return worker(a.dst, a.shard, a.num_shards)
     if a.label:
         return label(a.dst)
-    indices = prepare(a.src, a.dst, a.student)
+    indices = prepare(a.src, a.dst, a.student, a.limit)
     gpus = [g.strip() for g in a.gpus.split(",")]
     print(f"relabel {len(indices)} questions with {a.student} on GPUs {gpus}", flush=True)
     procs = []
