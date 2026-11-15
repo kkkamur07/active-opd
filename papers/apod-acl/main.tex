@@ -1,0 +1,444 @@
+% ACL paper: what makes a good rollout for on-policy post-training (rewrite 2026-11-15, storyline papers/apod-story.md v4).
+% Evidence: experiments/p2b-analysis/* built from outputs/runs_results/p2b/ (2B selection program, seed 1; seed 2 partial).
+% Previous version (aligned-band headline) is in git at b7fc097. Keep the % src: comments.
+\documentclass[11pt]{article}
+
+% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
+% Change to "preprint" to generate a non-anonymous version with page numbers.
+\usepackage[review]{acl}
+
+% Standard package includes
+\usepackage{times}
+\usepackage{latexsym}
+
+% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
+\usepackage[T1]{fontenc}
+
+% This assumes your files are encoded as UTF8
+\usepackage[utf8]{inputenc}
+
+% This is not strictly necessary, and may be commented out,
+% but it will improve the layout of the manuscript,
+% and will typically save some space.
+\usepackage{microtype}
+
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+
+%Including images in your LaTeX document requires adding
+%additional package(s)
+\usepackage{graphicx}
+
+% Added for this paper
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{longtable}
+\usepackage{array}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\newcommand{\ci}[2]{\,[{#1},\,{#2}]}
+\newcommand{\pts}{\,pts}
+\newcommand{\accfin}{acc$|$fin}
+
+\title{What Makes a Good Rollout for On-Policy Post-Training?\\Choose the Question, Not the Answer}
+
+\author{First Author \\
+  Affiliation / Address line 1 \\
+  \texttt{email@domain} \\\And
+  Second Author \\
+  Affiliation / Address line 1 \\
+  \texttt{email@domain} \\}
+
+\begin{document}
+\maketitle
+
+% STATUS (2026-11-15): seed 1 of 3 for every arm; seed 2 of the question-KL group to step 45. Numbers marked
+% "% src: ... s1" come from experiments/p2b-analysis/{s1_analysis.json, curve_ci.json, signals.json, finish_decomp.txt}
+% (built from outputs/runs_results/p2b/, pulled from the VM). Claims we expect to change with seeds 2-3 are listed in
+% papers/apod-story.md §5. Repo -> paper names: kl_high/mid/low = rollout KL high/middle/low; ent_top4 = rollout entropy
+% high; qkl_high/mid/low = question KL high/middle/low; t_right_s_wrong / both_right / mixed / both_wrong = correctness
+% buckets; random = random. The earlier MidAlign runs are the pilot study (Appendix B).
+\begin{abstract}
+On-policy post-training lets a stronger teacher correct a small model's own answers token by token.
+It works, but it is expensive: every answer is a long generation that the teacher has to read, and the usual recipe trains on whatever was sampled.
+We wanted to know what makes a rollout worth training on.
+We started from three properties that sound right: the answer is correct, it is aligned with the teacher's distribution (neither too close nor too far in reverse KL), and the student is uncertain about it.
+We turned each into a selection rule for questions and for answers within a question, and trained a Qwen3.5-2B student with a Qwen3.5-9B teacher under the same budget for every rule.
+At the question level both alignment and correctness mattered. Training on the questions where teacher and student disagree most gained 1.7 points on MATH-500 over random selection, while the most aligned questions lost 1.9 and questions neither model solves lost 1.7. % src: curve_ci.json qkl_high +1.69, qkl_low -1.93, both_wrong -1.71
+Choosing answers did not help at all: every answer-level rule, including the aligned middle band we expected to win, stayed within 0.4 points of random. % src: curve_ci.json kl_high -0.34, kl_mid -0.30, kl_low +0.25, ent_top4 -0.06
+Most of the gain shows up as answers that finish within the token budget.
+\end{abstract}
+
+%=====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+On-policy post-training is one of the simplest ways to make a small reasoning model better.
+The student writes its own answer, a stronger frozen teacher scores every token, and the student moves toward what the teacher would have said by minimizing reverse KL \citep{agarwal2024gkd,gu2024minillm,lu2025opd}.
+It is now a standard step for small reasoning models \citep{yang2025qwen3}.
+
+The problem is cost.
+A reasoning answer runs to thousands of tokens and the teacher has to read every one of them \citep{ko2024distillm,zhang2026fullrollouts}.
+In our setting the student hits the 8,192-token cap on 93\% of its first training answers. % src: p2b-rollout-s1 metrics.jsonl random step 0 rollouts cap_hit_rate 0.934
+Still, the usual recipe trains on whatever was sampled.
+We believe some answers teach more than others, and if we knew which, we could spend the teacher's compute there.
+
+So we asked a simple question: what makes a rollout good for training?
+Three answers come up again and again, and all three sound right.
+\begin{enumerate}
+\setlength\itemsep{0pt}
+\item \emph{Correctness.} Train where the teacher is right and the student is wrong; questions nobody solves teach nothing.
+\item \emph{Distributional alignment.} Train on answers that are neither too close to the teacher (nothing to learn) nor too far from it (too much to absorb). We believed this one ourselves after a pilot study (Appendix~\ref{app:pilot}).
+\item \emph{Uncertainty.} Train where the student is unsure, as in active learning \citep{kung2023active}.
+\end{enumerate}
+Each property can be used in two places: to choose which questions get a training slot, and to choose which of a question's answers we keep.
+
+We tested all of them in one controlled program (\S\ref{sec:setup}).
+Every arm trains the same Qwen3.5-2B student with the same frozen Qwen3.5-9B teacher for 60 steps on 480 answers per refresh, drawn from one shared question pool, and only the selection rule changes.
+That gives eleven rules, each compared with random selection.
+Here is what we found.
+\begin{enumerate}
+\setlength\itemsep{0pt}
+\item \textbf{Question alignment matters, in the direction we did not expect.} The third of questions where teacher and student disagree most gains 1.69 points over random, and the most aligned third loses 1.93 (\S\ref{sec:question}). % src: curve_ci.json qkl_high +1.69, qkl_low -1.93
+\item \textbf{Question correctness matters.} Questions the teacher solves and the student fails gain 0.90 points, and questions neither model solves lose 1.71. % src: curve_ci.json t_right_s_wrong +0.90, both_wrong -1.71
+\item \textbf{Choosing answers does not matter.} Keeping the high, middle or low KL third of a question's answers, or its most uncertain ones, stays within 0.4 points of random (\S\ref{sec:rollout}). This is the opposite of what we expected going in. % src: curve_ci.json
+\end{enumerate}
+Behind all three sits one plain fact: at this budget, training mostly teaches the student to finish.
+When the 2B finishes an answer within the budget it is right 99.4\% of the time or more (\S\ref{sec:finish}). % src: s1_analysis.json min acc_fin 0.9936
+
+Why would the question matter and the answer not?
+We believe it comes down to what the loss sees.
+Reverse KL never sees whether the final answer is right; it sees how far the student's next-token distribution is from the teacher's.
+Question KL measures exactly that, and the answers to one question share most of it (\S\ref{sec:analysis}).
+
+To be fair, these are results from one training seed. A second seed agrees on the question ordering so far, and we list the runs that will settle the rest (\S\ref{sec:discussion}).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/p2b_forest.pdf}
+  \caption{Each rule minus random, MATH-500 strict avg@4, averaged over steps 15, 30, 45 and 60 (seed 1). Bars: 95\% paired bootstrap over problems, which covers test-set noise only. Answer-level rules (top) stay near zero; question-level rules (middle, bottom) spread out.} % src: figures/p2b_forest.pdf from curve_ci.json (make_figures_p2b.py)
+  \label{fig:forest}
+\end{figure}
+
+%=====================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{On-policy post-training.}
+GKD and MiniLLM train a student on its own samples with reverse KL \citep{agarwal2024gkd,gu2024minillm}, now standard for small reasoning models \citep{yang2025qwen3,lu2025opd}.
+Recent work asks when it works \citep{li2026rethinking,fu2026revisiting}, studies its entropy structure \citep{yang2026shape,jin2026eopd} and the gap to much stronger teachers \citep{li2025smallmodels}, and asks whether full rollouts are needed \citep{zhang2026fullrollouts}.
+
+\paragraph{Data selection.}
+Closest to us, \citet{hou2026whatmatters} and \citet{wang2026beyondprompt} study which prompts matter in on-policy distillation; \citet{wang2026beyondprompt} find that targeted prompt selection, including a teacher-student log-ratio selector, does not consistently beat uniform sampling.
+``Neither too easy nor too hard'' is a recurring idea in curricula and data selection \citep{mindermann2022rholoss,tzannetos2023proximal,foster2025learnability,liu2026sweetspot}, and RL with verifiable rewards selects tokens, prompts and rollouts \citep{lin2024rho1,wang2025beyond8020,yu2025dapo,xu2025pods}.
+Random selection is a strong baseline \citep{xia2024random}.
+We compare correctness, alignment and uncertainty side by side, at both levels, under one budget.
+
+\paragraph{Length and budgets.}
+Reasoning models overthink \citep{chen2024overthinking,fatemi2025concise}, a termination mismatch inflates length in on-policy distillation \citep{yang2026eos}, and rankings change with the token budget \citep{desouza2026budget}.
+Math benchmarks are sensitive to seeds \citep{hochlehnert2025sober}, so we report paired intervals and say what they leave out \citep{miller2024errorbars}.
+
+%=====================================================================
+\section{Setup}
+\label{sec:setup}
+
+\paragraph{Training loop.}
+Let $\pi_\theta$ be the student, $\pi_T$ the frozen teacher and $y\sim\pi_\theta(\cdot\mid x)$ a rollout for question $x$.
+We score a rollout by its mean per-token reverse KL, computed exactly over the full vocabulary with the teacher reading the student's tokens,
+\begin{equation}
+\begin{aligned}
+D_t(y)&=D_{\mathrm{KL}}\!\left(\pi_\theta(\cdot\mid x,y_{<t})\,\middle\|\,\pi_T(\cdot\mid x,y_{<t})\right),\\
+s(y)&=\frac{1}{|y|}\sum_{t=1}^{|y|}D_t(y),
+\end{aligned}
+\label{eq:score}
+\end{equation}
+and a question by the mean score of its rollouts, $s(x)=\frac{1}{n}\sum_i s(y_i)$.
+Training minimizes the same token-averaged reverse KL on the kept rollouts with TRL's \texttt{GKDTrainer} ($\beta=1$, $\lambda=0$) \citep{vonwerra2020trl}. % src: p2b-rollout-s1 resolved_config.yaml train.beta 1.0, lmbda 0.0
+Every 15 optimizer steps (a \emph{refresh}) the current student samples 1,440 new rollouts with vLLM \citep{kwon2023vllm}, the teacher scores all of them, and the arm's rule keeps 480, which is one epoch of 15 steps at an effective batch of 32. % src: p2b_rollout.yaml / p2b_qkl.yaml; resolved_config.yaml refresh_every 15, micro 8 x accum 2 x 2 GPUs
+Four refreshes give 60 steps.
+Questions are never reused, and all arms of a group share the step-0 pool.
+
+\paragraph{Selection rules.}
+Table~\ref{tab:arms} lists the twelve arms.
+\emph{Answer-level} arms draw 120 questions and sample 12 rollouts each, then keep 4 per question: KL ranks 1 to 4, 5 to 8 or 9 to 12, the four with the highest student entropy, or four at random.
+Random is the shared baseline; keeping four of twelve at random is the same, in distribution, as sampling four.
+\emph{Question alignment} arms draw 360 questions with 4 rollouts each and keep the high, middle or low third of questions by $s(x)$, with all their rollouts.
+\emph{Correctness} arms draw 120 questions from one bucket of a labeled bank and keep all 4 rollouts.
+A model \emph{solves} a question if at least 3 of its 4 rollouts are strictly correct and \emph{fails} it if at most 1 is; the teacher's labels come from 4 rollouts of the 9B and the student's from 4 rollouts of the base 2B, both at 8k. % src: resolved_config.yaml bank correct_min 3, wrong_max 1; bank-8k questions.jsonl student_grades/teacher_grades
+\emph{Mixed} is every labeled question in none of the other three buckets.
+All arms train on 480 rollouts per refresh; they differ in which ones.
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{1.75cm}p{2.45cm}p{2.6cm}@{}}
+\toprule
+Property & Answer level & Question level \\
+\midrule
+Alignment (KL) & keep KL ranks 1 to 4, 5 to 8, or 9 to 12 of 12 & keep the high, middle or low third of 360 \\
+Uncertainty & keep the 4 of 12 with highest entropy & n/a \\
+Correctness & n/a & 4 buckets: teacher right and student wrong, both right, mixed, both wrong \\
+None (random) & keep 4 of 12 at random & n/a \\
+\bottomrule
+\end{tabular}
+\caption{The twelve arms. Each trains on 480 rollouts per refresh for 4 refreshes of 15 steps. Within a question, rollouts barely differ in correctness (\S\ref{sec:analysis}), so we test correctness only at the question level; entropy ranks a question's rollouts much like KL (Spearman 0.69), so we test it only at the answer level.} % src: signals.json A_within_spear_kl_sent 0.692, A_band_props correct 8.3-9.0%
+\label{tab:arms}
+\end{table}
+
+\paragraph{Models and data.}
+The student is Qwen3.5-2B and the teacher Qwen3.5-9B \citep{qwen2026qwen35_2b,qwen2026qwen35_9b}, both in thinking mode.
+Rollouts use temperature 1.0, top-$p$ 0.95, top-$k$ 20 and an 8,192-token cap. % src: resolved_config.yaml rollout temperature 1.0, top_p 0.95, top_k 20, max_new_tokens 8192
+Training uses bf16, a peak learning rate of $3.16\times10^{-6}$ with 3 warmup steps and cosine decay to a tenth, and keeps Adam state across refreshes. % src: resolved_config.yaml learning_rate 3.1623e-06, warmup_steps 3, cosine_with_min_lr min_lr_rate 0.1, persist_optimizer true, bf16 true
+Questions come from a competition-math set derived from OpenThoughts \citep{zhao2026openthoughtsdata,guha2025openthoughts}\footnote{\url{https://huggingface.co/datasets/siyanzhao/Openthoughts_math_30k_opsd}}; Appendix~\ref{app:data} gives the contamination check.
+
+\paragraph{Evaluation.}
+We evaluate all 500 MATH-500 problems \citep{hendrycks2021math,lightman2023verify} with four samples each at the training cap, at steps 0, 15, 30, 45 and 60.
+A sample is strict-correct if Math-Verify accepts it \citep{kydlicek2025mathverify} and it contains \texttt{\textbackslash boxed\{\}}.
+We report strict avg@4, pass@4 and the \emph{finish rate}, the share of samples that end before the cap.
+Our summary of an arm is its mean accuracy over steps 15 to 60, compared with random through a paired bootstrap over problems (10,000 resamples).
+These intervals capture test-set noise only; training noise needs the seeds still running.
+Our pre-registered primary contrast was the middle KL band against random.
+For a sense of evaluation noise, the same base model scored 26.50\% and 27.15\% on two sampling seeds. % src: p2b-qkl-s1 vs p2b-qkl-s2 metrics.jsonl step 0 strict 0.265 / 0.2715
+The teacher scores 61.15\% at the same cap. % src: outputs/runs/kl50_teacher (todo.md: avg@4 0.6115 at 8192)
+
+%=====================================================================
+\section{Results}
+\label{sec:results}
+
+\begin{table*}[t]
+\centering\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lrrrrrlr@{}}
+\toprule
+ & \multicolumn{4}{c}{Strict avg@4 (\%) at step} & Mean & Mean minus random & Finish \\
+\cmidrule(lr){2-5}
+Arm & 15 & 30 & 45 & 60 & 15 to 60 & (pts) [95\% CI] & at 60 (\%) \\
+\midrule
+% src: experiments/p2b-analysis/tex_rows.tex (make_tex_tables.py from s1_analysis.json, curve_ci.json); step 0 = 26.50 for every arm, finish 20.5
+\multicolumn{8}{@{}l}{\emph{Baseline}} \\
+\quad Random & 41.90 & 42.15 & 43.15 & 42.85 & 42.51 & n/a & 36.8 \\
+\multicolumn{8}{@{}l}{\emph{Which answer}} \\
+\quad KL high & 41.20 & 41.95 & 43.55 & 42.00 & 42.17 & $-$0.34 [$-$1.18, +0.49] & 35.8 \\
+\quad KL middle & 41.60 & 42.20 & 42.45 & 42.60 & 42.21 & $-$0.30 [$-$1.07, +0.47] & 33.7 \\
+\quad KL low & 40.70 & 42.80 & 43.80 & 43.75 & 42.76 & +0.25 [$-$0.50, +1.01] & 36.7 \\
+\quad Entropy high & 41.95 & 41.80 & 42.40 & 43.65 & 42.45 & $-$0.06 [$-$0.85, +0.73] & 36.4 \\
+\multicolumn{8}{@{}l}{\emph{Which question: alignment}} \\
+\quad KL high & 42.15 & 44.45 & 45.65 & 44.55 & 44.20 & \textbf{+1.69 [+0.85, +2.53]} & 37.8 \\
+\quad KL middle & 43.70 & 41.60 & 41.55 & 42.50 & 42.34 & $-$0.18 [$-$0.96, +0.59] & 35.0 \\
+\quad KL low & 39.15 & 40.30 & 42.40 & 40.50 & 40.59 & \underline{$-$1.93 [$-$2.75, $-$1.12]} & 34.2 \\
+\multicolumn{8}{@{}l}{\emph{Which question: correctness}} \\
+\quad Teacher right, student wrong & 40.10 & 44.85 & 44.50 & 44.20 & 43.41 & \textbf{+0.90 [+0.03, +1.76]} & 36.4 \\
+\quad Both right & 42.25 & 42.75 & 44.10 & 44.15 & 43.31 & +0.80 [$-$0.14, +1.73] & 37.0 \\
+\quad Mixed & 39.80 & 43.15 & 44.40 & 43.00 & 42.59 & +0.07 [$-$0.74, +0.89] & 35.7 \\
+\quad Both wrong & 40.70 & 40.55 & 40.75 & 41.20 & 40.80 & \underline{$-$1.71 [$-$2.59, $-$0.84]} & 36.0 \\
+\bottomrule
+\end{tabular}
+\caption{MATH-500 at an 8k budget, seed 1. Every arm starts from the base student (26.50\%, finish rate 20.5\%). Bold: interval above zero; underlined: below zero. Intervals are paired over problems and capture test-set noise only. Pass@4 and per-step intervals are in Appendix~\ref{app:full}.}
+\label{tab:main}
+\end{table*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/p2b_curves.pdf}
+  \caption{Learning curves by lever, seed 1 (step 0 is 26.50\% for every arm). Random (dashed red) is the same run in every panel.} % src: figures/p2b_curves.pdf from s1_analysis.json
+  \label{fig:curves}
+\end{figure*}
+
+\subsection{Training mostly teaches the student to finish}
+\label{sec:finish}
+
+Before comparing rules, it helps to see what training changes.
+At an 8k budget the base 2B finishes only 20.5\% of its MATH-500 answers, and every one of those 410 finished answers is correct. % src: eval_rows base: fin 410, strict|fin 1.000
+Its errors are answers that run out of budget.
+This stays true after training: in all 49 evaluations, finished answers are correct at least 99.4\% of the time. % src: s1_analysis.json min acc_fin 0.9936 (qkl_high step 30)
+Random selection lifts accuracy from 26.50\% to 42.85\% and the finish rate from 20.5\% to 36.8\%, and across the 48 trained checkpoints accuracy tracks the finish rate with $r=0.80$ (Figure~\ref{fig:finish}). % src: finish_decomp.txt base->random60 +16.35, finish 20.5->36.8; make_figures_p2b.py r(trained, n=48)=0.798
+So ``accuracy'' here mostly means ``problems solved within the budget'', and the arms differ mainly in how often they finish.
+
+\subsection{Which answer you keep does not matter}
+\label{sec:rollout}
+
+All four answer-level rules end up where random does (Table~\ref{tab:main}, Figure~\ref{fig:forest}).
+Over steps 15 to 60 they sit between $-$0.34 and +0.25 points, and every interval includes zero.
+The middle KL band, our pre-registered method, is at $-$0.30 [$-$1.07, +0.47], so the aligned-band hypothesis from the pilot is not supported in this design. % src: curve_ci.json kl_mid
+Keeping the most uncertain answers, the classic active-learning rule, is at $-$0.06.
+At no single step does an answer-level rule differ from random by more than 1.2 points (Figure~\ref{fig:curves}, left). % src: analyze_s1.py per-step diffs vs random, rollout arms max |diff| 1.20 (kl_low step 15)
+
+\subsection{Which question you train on does}
+\label{sec:question}
+
+Question-level rules spread over 3.6 points, six times the spread of the answer-level rules (Figure~\ref{fig:forest}). % src: curve_ci.json qkl_high +1.69 - qkl_low -1.93 = 3.62; rollout-level +0.25 - (-0.34) = 0.59
+By question alignment the order is monotone, and it runs the other way from our hypothesis: the high third gains 1.69 points [+0.85, +2.53], the middle third $-$0.18 and the low third loses 1.93 [$-$2.75, $-$1.12]. % src: curve_ci.json
+The high third leads the middle third at steps 30, 45 and 60 (Figure~\ref{fig:curves}, middle), and in the partial second seed it leads again at steps 15, 30 and 45, by 1.58 points on average against 1.80 in seed 1. % src: curve_ci.txt p2b-qkl-s2 qkl_high-qkl_mid [2.7, 1.0, 1.05] mean 1.58; s1 mean 1.80
+By correctness, questions the teacher solves and the student fails gain 0.90 [+0.03, +1.76], questions both solve gain 0.80, mixed questions do nothing and questions both fail lose 1.71 [$-$2.59, $-$0.84]. % src: curve_ci.json
+Questions that both models fail also hurt in our pilot, which used a different schedule and learning rate ($-$2.59 points; Appendix~\ref{app:pilot}). % src: papers/apod-story.md v3 Beat 7 (r1 both-wrong -2.59 pooled)
+
+The differences again show up as finishing.
+Splitting each contrast into a finish-rate part and a remainder, the finish rate accounts for +2.03 of the high-KL third's +1.69 and $-$1.98 of the low third's $-$1.93. % src: finish_decomp.txt qkl_high +2.03, qkl_low -1.98
+One arm breaks the pattern: questions both models solve gain through answers that are capped but already contain the boxed answer ($+$1.91 points), not through finishing ($-$1.11). % src: finish_decomp.txt both_right d_from_finish -1.11, d_from_capped +1.91
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/p2b_finish.pdf}
+  \caption{Strict accuracy against finish rate for every arm and step (48 trained checkpoints, seed 1) and the base model. Finished answers are correct at least 99.4\% of the time, so accuracy mostly measures finishing.} % src: figures/p2b_finish.pdf; s1_analysis.json
+  \label{fig:finish}
+\end{figure}
+
+%=====================================================================
+\section{Why the Question Matters and the Answer Does Not}
+\label{sec:analysis}
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+ & KL & Ent. & Stud. & Teach. & Both \\
+ & (nats) & & correct & pass & wrong \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Answer KL bands (120 q.\ $\times$ 4 each)}} \\
+% src: signals.json A_band_props (round 0, p2b-rollout-s1 random pool, 1,440 rollouts)
+\quad high (1 to 4) & 0.134 & 0.57 & 9.0\% & n/a & n/a \\
+\quad middle (5 to 8) & 0.123 & 0.54 & 8.3\% & n/a & n/a \\
+\quad low (9 to 12) & 0.112 & 0.49 & 8.8\% & n/a & n/a \\
+\multicolumn{6}{@{}l}{\emph{Question KL thirds (120 q.\ each)}} \\
+% src: signals.json B_thirds (round 0, p2b-qkl-s1 pool, 360 questions); teacher pass from bank-8k (9B, 4 rollouts)
+\quad high & 0.148 & 0.66 & 4.4\% & 24.8\% & 86 \\
+\quad middle & 0.120 & 0.51 & 10.0\% & 40.8\% & 63 \\
+\quad low & 0.095 & 0.40 & 9.4\% & 39.4\% & 64 \\
+\bottomrule
+\end{tabular}
+\caption{What each rule picks from the base student's first pool. Ent.: student token entropy. Stud.\ correct: strict accuracy of the student's rollouts. Teach.\ pass: the 9B's pass rate on the same questions. Both wrong: questions in that bucket.}
+\label{tab:signals}
+\end{table}
+
+\paragraph{The answers to one question are nearly the same example.}
+In the base student's first pool, 84.6\% of the variance in rollout KL lies between questions. % src: signals.json A_between_frac 0.846
+The three KL bands of a question differ by about 9\% in mean KL and not at all in correctness (8.3 to 9.0\%), and 91 to 95\% of their rollouts are truncated (Table~\ref{tab:signals}). % src: signals.json A_band_props trunc 0.948/0.942/0.912
+Picking a band therefore changes the training signal very little, which is what Table~\ref{tab:main} shows.
+Entropy behaves the same way: within a question it ranks rollouts much like KL (Spearman 0.69), and the four most uncertain rollouts overlap the four highest-KL ones 2.63 times out of 4, against 1.33 by chance. % src: signals.json A_within_spear_kl_sent 0.692, A_overlap_enttop4_klhigh 2.625
+Rollout KL is not a length proxy either; its within-question correlation with length is 0.20. % src: signals.json A_within_spear_kl_len 0.199 (18 questions with length variation)
+
+\paragraph{Question alignment is not correctness.}
+We expected the best questions to be the ones where the teacher knows more. They are not.
+The high-KL third is mostly questions both models fail (86 of 120), and the teacher solves only 24.8\% of its rollouts there, against about 40\% in the other two thirds (Table~\ref{tab:signals}). % src: signals.json B_thirds
+Across the 360 questions, question KL barely correlates with the teacher's pass rate (Spearman $-$0.15) or the student's ($-$0.11). % src: signals.json B_spear_qkl_teacherpass -0.147, B_spear_qkl_studentpass -0.108
+What it does track is uncertainty in both models: student entropy is 0.66 in the high third and 0.40 in the low third, and teacher entropy 0.58 and 0.34. % src: signals.json B_thirds sent/tent
+So high-KL questions and both-wrong questions overlap but are not the same thing: the both-wrong arm trained on rollouts with ordinary KL (0.105 nats, random 0.104) that were 99\% truncated, while the high-KL arm trained on 0.129 nats. % src: tex_rows.tex trained-set rows (s1_analysis.json selected, mean over 4 refreshes)
+
+\paragraph{What we think is happening.}
+We believe this comes down to what the loss can see.
+Reverse-KL post-training moves the student wherever its next-token distribution differs from the teacher's, and it never sees whether the final answer is right.
+The signal a question offers is how much disagreement it carries, which is question KL.
+A low-KL question gives the student little to move toward (0.081 nats per token in the low arm, against 0.129 in the high arm), so its refresh is mostly wasted. % src: tex_rows.tex trained-set rows qkl_low 0.081, qkl_high 0.129
+A both-wrong question is hard but carries no extra disagreement, and its rollouts never reach an end the student could learn from.
+Answers to one question share that question's disagreement, so choosing among them moves almost nothing.
+Finally, at an 8k budget the most useful thing a 2B model can learn is to commit to an answer and stop.
+High-KL questions are those where both models are least certain and the student writes long, hesitant traces, and we believe the teacher's corrections there carry exactly that lesson.
+We have not yet located which tokens carry the KL in these traces; that is the most direct test of this reading (\S\ref{sec:discussion}).
+
+%=====================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+So, what makes a rollout good for training? For a small student on a tight budget, mostly the question it comes from.
+Spend the teacher's effort on questions where it disagrees most with the student, and skip questions where the two already agree or where neither can solve the problem.
+Picking among a question's answers, by KL or by entropy, buys nothing. We expected the aligned middle band to win, and we were wrong.
+
+We expect the mechanism-level findings to hold as seeds come in: finished answers are almost always correct, answers to one question are nearly the same example, and question alignment and correctness measure different things.
+These are properties of the data, measured on thousands of rollouts.
+The sizes of the question-level effects are what the next runs will pin down:
+\begin{enumerate}
+\setlength\itemsep{0pt}
+\item seeds 2 and 3 for every arm, now running, to measure training noise;
+\item a best-checkpoint pick on 200 held-out training-distribution questions, as pre-registered;
+\item re-evaluation at a 16k or 32k budget, to separate solving more problems from finishing more of them;
+\item a token-level map of where the KL sits in high-KL questions, which needs no new training;
+\item a teacher-free question score (the student's mean entropy over 4 rollouts tracks question KL in Table~\ref{tab:signals}) that would make the rule cheap.
+\end{enumerate}
+
+%=====================================================================
+\section*{Limitations}
+
+\begin{enumerate}
+\setlength\itemsep{0pt}
+\item Every number in Table~\ref{tab:main} comes from one training seed; the intervals cover test-set noise only. In our pilot, training noise was larger than most effects (Appendix~\ref{app:pilot}). Runs 1 and 2 address this.
+\item At an 8k budget accuracy mostly measures finishing (\S\ref{sec:finish}); run 3 addresses this.
+\item We test one model pair, one training set, one budget and MATH-500 only. A Qwen3.5-4B student left too little room below the teacher at 8k (Appendix~\ref{app:4b}).
+\item The question-KL rule needs a teacher pass on every candidate question, so it saves training steps but not scoring; run 5 addresses this.
+\item The correctness buckets use labels from the base student, which go stale as it trains, while the KL arms rescore every refresh.
+\end{enumerate}
+
+\section*{Ethics and Reproducibility Statement}
+
+We use public models (Qwen3.5-2B and -9B, Apache-2.0) and data (MATH-500; the OpenThoughts-derived set, whose card lists no license), and see no risks beyond those of the base models.
+We release code, configurations, evaluation shards, reverse-KL scores and training logs for every run.
+
+\bibliography{refs}
+
+%=====================================================================
+\appendix
+
+\section{Full Results}
+\label{app:full}
+
+Table~\ref{tab:trained} describes what each arm trained on. Per-step pass@4 and per-step intervals are in our released analysis files; at step 60, pass@4 ranges from 53.0\% (question KL low) to 56.8\% (question KL high), with random at 54.4\%. % src: analyze_s1.py step-60 table pass4
+
+\begin{table}[ht]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Arm & KL & Ent. & Correct & Trunc. & Length \\
+\midrule
+% src: experiments/p2b-analysis/tex_rows.tex (s1_analysis.json "selected", mean over 4 refreshes)
+\multicolumn{6}{@{}l}{\emph{Baseline}} \\
+\quad Random & 0.104 & 0.387 & 25.5 & 87.6 & 7,762 \\
+\multicolumn{6}{@{}l}{\emph{Which answer}} \\
+\quad KL high & 0.114 & 0.422 & 25.3 & 90.3 & 7,886 \\
+\quad KL middle & 0.104 & 0.390 & 25.9 & 87.6 & 7,780 \\
+\quad KL low & 0.095 & 0.353 & 26.0 & 85.6 & 7,640 \\
+\quad Entropy high & 0.112 & 0.434 & 25.7 & 92.9 & 8,023 \\
+\multicolumn{6}{@{}l}{\emph{Which question: alignment}} \\
+\quad KL high & 0.129 & 0.496 & 23.3 & 89.8 & 7,862 \\
+\quad KL middle & 0.101 & 0.370 & 27.7 & 84.6 & 7,728 \\
+\quad KL low & 0.081 & 0.291 & 28.2 & 85.2 & 7,661 \\
+\multicolumn{6}{@{}l}{\emph{Which question: correctness}} \\
+\quad T right, S wrong & 0.104 & 0.383 & 48.5 & 71.2 & 7,411 \\
+\quad Both right & 0.094 & 0.329 & 95.4 & 23.0 & 4,602 \\
+\quad Mixed & 0.100 & 0.374 & 48.1 & 70.8 & 7,252 \\
+\quad Both wrong & 0.105 & 0.395 & 11.4 & 99.0 & 8,177 \\
+\bottomrule
+\end{tabular}
+\caption{The 480 rollouts each arm trained on per refresh, averaged over the four refreshes: mean reverse KL (nats), student entropy, strict accuracy (\%), share truncated at the cap (\%) and length (tokens). Training on short, finished, correct rollouts (both right) did not beat training on high-KL questions.}
+\label{tab:trained}
+\end{table}
+
+\section{Pilot Study}
+\label{app:pilot}
+
+Before this program we ran rollout-level KL selection in shorter runs at a learning rate of $2\times10^{-5}$ with Adam reset every round.
+In one run the middle KL band reached 47.45\% against 38.80\% for random after 34 steps, and after one round at a 16k budget it led by 3.75 and 3.70 points in two seeds. % src: results_tables.md kl50 step 34 (0.4745, 0.3880); oracle16k/oracle16k_seed2 kl_mid r1 +3.75/+3.70
+Over all ten middle-versus-random checkpoints the mean lead was only 1.20 points, the same configuration on two seeds differed by up to 24 points, and a 100-step run at $3.16\times10^{-6}$ showed no effect (+0.05). % src: critique-results §3.1(5) recomputed +1.20; apod-story v3 Beat 6 (24 pts; MidAlign-long +0.05)
+We formed the aligned-band hypothesis from these runs, and the present program was designed to test it at equal budget with a shared baseline; it does not support it.
+In the pilot's question-selection run, questions both models fail lost 2.59 points, in line with \S\ref{sec:question}. % src: apod-story v3 Beat 7 (r1 both_wrong -2.59 pooled)
+The pilot also showed the finishing effect: finished answers were correct 98 to 100\% of the time. % src: apod-story v3 Beat 5
+
+\section{A 4B Student}
+\label{app:4b}
+
+We first planned this program with a Qwen3.5-4B student.
+At an 8k budget the base 4B scores 57.15\% on MATH-500, 4.0 points below the 9B teacher's 61.15\%, which leaves little room for selection to show; we switched to the 2B, whose gap is 34.65 points. % src: HANDOFF.md §5 4B base MATH-500 @8k 57.15%; kl50_teacher 0.6115; p2b_base.yaml comment (USER 2026-11-14: gap 4.0 pts); 61.15 - 26.50 = 34.65
+A learning-rate sweep on the 4B was run but is not used: its step-0 held-out evaluation used a 16k cap and later ones 8k, so its curves are not comparable. % src: outputs/runs/p4b-lr/chosen_lr.json + NOTES.txt on the VM
+
+\section{Data and Contamination}
+\label{app:data}
+
+The training pool is the OpenThoughts-derived set above; the labeled bank holds 14,500 questions, and 200 further questions are held out for checkpoint selection. % src: bank-8k/questions.jsonl 14500 lines; apod/datasets/load.py otval200
+Our earlier contamination check found no evaluation problem with a duplicate in the pool that was ever trained on. % src: notes/apod-critique-data.md §4
+
+\end{document}
