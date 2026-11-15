@@ -104,3 +104,63 @@ ax.set_xlabel("Finished within 8,192 tokens (%)"); ax.set_ylabel("Strict avg@4 (
 ax.text(0.03, 0.95, f"trained checkpoints: r = {r_tr:.2f}", transform=ax.transAxes, fontsize=7, va="top")
 save(fig, "p2b_finish")
 print(f"fig3: r(trained, n={len(xs)}) = {r_tr:.3f}; r(with base) = {r_all:.3f}")
+
+# ---- Fig 0: method schematic (no data values): answer-level vs question-level selection
+from matplotlib.patches import Rectangle
+fig, axs = plt.subplots(1, 2, figsize=(6.5, 2.1))
+rng = np.random.default_rng(3)
+def panel(ax, title, nq, na, keep_rows, keep_cols, note, sort_cols):
+    ax.set_xlim(0, 10); ax.set_ylim(-0.9, 6.4); ax.axis("off")
+    ax.text(0.2, 6.2, title, fontsize=8.5, fontweight="bold", va="top")
+    cw, ch = 9.6 / na, 4.6 / nq
+    for i in range(nq):
+        base = rng.uniform(0.25, 0.85)
+        vals = np.clip(base + rng.normal(0, 0.07, na), 0, 1)
+        if sort_cols: vals = np.sort(vals)[::-1]
+        for j, v in enumerate(vals):
+            kept = (i in keep_rows) and (j in keep_cols)
+            ax.add_patch(Rectangle((0.2 + j * cw, 0.6 + (nq - 1 - i) * ch), cw * 0.88, ch * 0.8,
+                                   facecolor=plt.cm.Blues(0.25 + 0.7 * v),
+                                   edgecolor=PALETTE["red_strong"] if kept else "white", lw=1.5 if kept else 0.4))
+    ax.text(0.2, -0.2, note, fontsize=7, va="center")
+panel(axs[0], "Choosing answers", 6, 12, set(range(6)), {4, 5, 6, 7},
+      "12 answers per question, sorted by KL (darker = higher);\nkeep 4 per question, e.g. the middle band", True)
+panel(axs[1], "Choosing questions", 9, 4, {0, 3, 6}, set(range(4)),
+      "4 answers per question; shade = question KL;\nkeep a third of the questions with all their answers", False)
+save(fig, "p2b_method")
+
+# ---- Fig 4: what the signals measure (round-0 pools, seed 1)
+import json as _j
+from collections import defaultdict as _dd
+rows = [_j.loads(l) for l in open(REPO / "outputs/runs_results/p2b/p2b_rollouts_compact.jsonl")]
+fig, axs = plt.subplots(1, 2, figsize=(6.5, 2.5), gridspec_kw={"width_ratios": [1.5, 1]})
+Q = _dd(list)
+for r in rows:
+    if r["run"] == "p2b-rollout-s1" and r["arm"] == "random" and r["round"] == 0 and "kl" in r:
+        Q[r["ex"]].append(r["kl"])
+order = sorted(Q, key=lambda q: np.mean(Q[q]))
+for x, q in enumerate(order):
+    v = np.array(Q[q])
+    axs[0].plot([x, x], [v.min(), v.max()], color=PALETTE["neutral"], lw=0.8)
+    axs[0].plot(x, v.mean(), "o", color=PALETTE["blue_main"], ms=1.8)
+axs[0].set_xlabel("Question (sorted by mean KL)"); axs[0].set_ylabel("Answer reverse KL (nats)")
+axs[0].set_xticks([])
+axs[0].set_title("Answers of one question sit close together", fontsize=8)
+B = _dd(list)
+for r in rows:
+    if r["run"] == "p2b-qkl-s1" and r["arm"] == "qkl_mid" and r["round"] == 0 and "kl" in r:
+        B[r["ex"]].append(r)
+qs = sorted(B.values(), key=lambda v: -np.mean([x["kl"] for x in v])); n = len(qs) // 3
+thirds = [("high", qs[:n]), ("middle", qs[n:2 * n]), ("low", qs[2 * n:])]
+buckets = [("both_wrong", "Both wrong", PALETTE["red_2"]), ("teacher_right_student_wrong", "T right, S wrong", PALETTE["blue_secondary"]),
+           ("mixed", "Mixed", PALETTE["neutral"]), ("both_right", "Both right", PALETTE["green_3"])]
+left = np.zeros(3)
+for key, lab, col in buckets:
+    vals = np.array([sum(q[0].get("b_bucket") == key for q in t) for _, t in thirds], float)
+    axs[1].barh([0, 1, 2], vals, left=left, color=col, label=lab, height=0.6)
+    left += vals
+axs[1].set_yticks([0, 1, 2], [f"KL {t}" for t, _ in thirds]); axs[1].invert_yaxis()
+axs[1].set_xlabel("Questions in the third"); axs[1].set_title("Question KL thirds by correctness", fontsize=8)
+axs[1].legend(fontsize=6.2, loc="upper center", bbox_to_anchor=(0.45, -0.32), ncol=2, handlelength=1, columnspacing=0.8)
+save(fig, "p2b_signals")
+print("fig4 thirds buckets:", [{k: sum(q[0].get('b_bucket') == k for q in t) for k, _, _ in buckets} for _, t in thirds])
