@@ -101,7 +101,7 @@ Each property can be used in two places: to choose which questions get a trainin
 
 We tested all of them in one controlled program (\S\ref{sec:setup}).
 Every arm trains the same Qwen3.5-2B student with the same frozen Qwen3.5-9B teacher for 60 steps on 480 answers per refresh, drawn from one shared question pool, and only the selection rule changes.
-That gives eleven rules, each compared with random selection.
+That gives eleven rules, each compared with random selection (Table~\ref{tab:arms}).
 Here is what we found.
 \begin{enumerate}
 \setlength\itemsep{0pt}
@@ -161,16 +161,16 @@ s(y)&=\frac{1}{|y|}\sum_{t=1}^{|y|}D_t(y),
 \end{equation}
 and a question by the mean score of its rollouts, $s(x)=\frac{1}{n}\sum_i s(y_i)$.
 Training minimizes the same token-averaged reverse KL on the kept rollouts with TRL's \texttt{GKDTrainer} ($\beta=1$, $\lambda=0$) \citep{vonwerra2020trl}. % src: p2b-rollout-s1 resolved_config.yaml train.beta 1.0, lmbda 0.0
-Questions come from OpenThoughts math (described below). Every 15 optimizer steps (a \emph{refresh}) the current student samples 1,440 new rollouts with vLLM \citep{kwon2023vllm}, the teacher scores all of them, and the arm's rule keeps 480, which is one epoch of 15 steps at an effective batch of 32. % src: p2b_rollout.yaml / p2b_qkl.yaml; resolved_config.yaml refresh_every 15, micro 8 x accum 2 x 2 GPUs
+Every 15 optimizer steps (a \emph{refresh}) the current student samples new rollouts with vLLM \citep{kwon2023vllm}, the teacher scores all of them, and the arm's rule keeps 480, which is one epoch of 15 steps at an effective batch of 32. % src: resolved_config.yaml refresh_every 15, micro 8 x accum 2 x 2 GPUs; metrics.jsonl: 1440 generated (rollout, qkl), 480 generated (correct), 480 kept (all)
 Four refreshes give 60 steps.
-Questions are never reused, and all arms of a group share the step-0 pool.
+Questions are never reused, and arms at the same level start from the same first pool.
 
 \paragraph{Selection rules.}
 Table~\ref{tab:arms} lists the twelve arms.
 \emph{Answer-level} arms draw 120 questions and sample 12 rollouts each, then keep 4 per question: KL ranks 1 to 4, 5 to 8 or 9 to 12, the four with the highest student entropy, or four at random.
 Random is the shared baseline; keeping four of twelve at random is the same, in distribution, as sampling four.
 \emph{Question alignment} arms draw 360 questions with 4 rollouts each and keep the high, middle or low third of questions by $s(x)$, with all their rollouts.
-\emph{Correctness} arms draw 120 questions from one bucket of a labeled bank and keep all 4 rollouts.
+\emph{Correctness} arms draw 120 questions from one bucket and keep all 4 rollouts of each, so they sample 480 rollouts rather than 1,440.
 A model \emph{solves} a question if at least 3 of its 4 rollouts are strictly correct and \emph{fails} it if at most 1 is; the teacher's labels come from 4 rollouts of the 9B and the student's from 4 rollouts of the base 2B, both at 8k. % src: resolved_config.yaml bank correct_min 3, wrong_max 1; bank-8k questions.jsonl student_grades/teacher_grades
 \emph{Mixed} is every labeled question in none of the other three buckets.
 All arms train on 480 rollouts per refresh; they differ in which ones.
@@ -183,12 +183,12 @@ All arms train on 480 rollouts per refresh; they differ in which ones.
 Property & Answer level & Question level \\
 \midrule
 Alignment (KL) & keep KL ranks 1 to 4, 5 to 8, or 9 to 12 of 12 & keep the high, middle or low third of 360 \\
-Uncertainty & keep the 4 of 12 with highest entropy & n/a \\
+Uncertainty & keep the 4 of 12 with highest entropy & highest-entropy third of 360 (pending, \S\ref{sec:qent}) \\
 Correctness & n/a & 4 buckets: teacher right and student wrong, both right, mixed, both wrong \\
 None (random) & keep 4 of 12 at random & n/a \\
 \bottomrule
 \end{tabular}
-\caption{The twelve arms. Each trains on 480 rollouts per refresh for 4 refreshes of 15 steps. Within a question, rollouts barely differ in correctness (\S\ref{sec:analysis}), so we test correctness only at the question level; entropy ranks a question's rollouts much like KL (Spearman 0.69), so we test it only at the answer level.} % src: signals.json A_within_spear_kl_sent 0.692, A_band_props correct 8.3-9.0%
+\caption{The twelve arms. Each trains on 480 rollouts per refresh for 4 refreshes of 15 steps. Within a question, rollouts barely differ in correctness (\S\ref{sec:analysis}), so we test correctness only at the question level; at the question level, uncertainty is still running.} % src: signals.json A_band_props correct 8.3-9.0%
 \label{tab:arms}
 \end{table}
 
@@ -262,7 +262,7 @@ Arm & 15 & 30 & 45 & 60 & 15 to 60 & (pts) \\
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/p2b_curves.pdf}
-  \caption{Learning curves by lever, seed 1 (step 0 is 26.50\% for every arm). Random (dashed red) is the same run in every panel.} % src: figures/p2b_curves.pdf from s1_analysis.json
+  \caption{Learning curves for each group of rules, seed 1 (step 0 is 26.50\% for every arm). Random (dashed red) is the same run in every panel.} % src: figures/p2b_curves.pdf from s1_analysis.json
   \label{fig:curves}
 \end{figure*}
 
@@ -283,7 +283,7 @@ By question alignment the order is monotone, and it runs the other way from our 
 The high third leads the middle third at steps 30, 45 and 60 (Figure~\ref{fig:curves}, middle), and in the partial second seed it leads again at steps 15, 30 and 45, by 1.58 points on average against 1.80 in seed 1. % src: curve_ci.txt p2b-qkl-s2 qkl_high-qkl_mid [2.7, 1.0, 1.05] mean 1.58; s1 mean 1.80
 By correctness, questions the teacher solves and the student fails gain 0.90, questions both solve gain 0.80, mixed questions do nothing and questions both fail lose 1.71.
 So the clearest correctness effect is a filter: drop the questions nobody can solve. % src: curve_ci.json
-Questions that both models fail also hurt in our pilot, which used a different schedule and learning rate ($-$2.59 points; Appendix~\ref{app:pilot}). % src: papers/apod-story.md v3 Beat 7 (r1 both-wrong -2.59 pooled)
+Questions that both models fail also hurt in our pilot, which used a different design: a fixed set of 800 questions over 100 steps ($-$2.59 points; Appendix~\ref{app:pilot}). % src: papers/apod-story.md v3 Beat 7 (r1 both-wrong -2.59 pooled)
 
 \subsection{Can the student pick its own questions?}
 \label{sec:qent}
@@ -330,7 +330,7 @@ Rollout KL is not a length proxy either; its within-question correlation with le
 
 \paragraph{Question alignment is not correctness.}
 We expected the best questions to be the ones where the teacher knows more. They are not.
-The high-KL third is mostly questions both models fail (86 of 120), and the teacher solves only 24.8\% of its rollouts there, against about 40\% in the other two thirds (Table~\ref{tab:signals}). % src: signals.json B_thirds
+The high-KL third is mostly questions both models fail (86 of 120), and the teacher answers only 24.8\% of its own attempts correctly there, against about 40\% in the other two thirds (Table~\ref{tab:signals}). % src: signals.json B_thirds
 Across the 360 questions, question KL barely correlates with the teacher's pass rate (Spearman $-$0.15) or the student's ($-$0.11). % src: signals.json B_spear_qkl_teacherpass -0.147, B_spear_qkl_studentpass -0.108
 What it does track is uncertainty in both models: student entropy is 0.66 in the high third and 0.40 in the low third, and teacher entropy 0.58 and 0.34. % src: signals.json B_thirds sent/tent
 So high-KL questions and both-wrong questions overlap but are not the same thing: the both-wrong arm trained on answers with ordinary KL (0.105 nats, random 0.104), while the high-KL arm trained on 0.129 nats.
@@ -368,7 +368,7 @@ The sizes of the question-level effects are what the next runs will pin down:
 \item seeds 2 and 3 for every arm, now running, to measure training noise;
 \item a best-checkpoint pick on 200 held-out training-distribution questions, as pre-registered;
 \item re-evaluation at a 16k or 32k budget, to check that the ranking holds with more room to think;
-\item a token-level map of where the KL sits in high-KL questions, which needs no new training;
+\item a token-level map of where the KL sits in high-KL questions, which needs no new training.
 \end{enumerate}
 
 %=====================================================================
