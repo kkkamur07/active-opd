@@ -309,6 +309,7 @@ We expected the best questions to be the ones where the teacher knows more. They
 The high-KL third is mostly questions both models fail (86 of 120), and the teacher solves only 24.8\% of its rollouts there, against about 40\% in the other two thirds (Table~\ref{tab:signals}). % src: signals.json B_thirds
 Across the 360 questions, question KL barely correlates with the teacher's pass rate (Spearman $-$0.15) or the student's ($-$0.11). % src: signals.json B_spear_qkl_teacherpass -0.147, B_spear_qkl_studentpass -0.108
 What it does track is uncertainty in both models: student entropy is 0.66 in the high third and 0.40 in the low third, and teacher entropy 0.58 and 0.34. % src: signals.json B_thirds sent/tent
+It tracks the student's own uncertainty so closely that the student alone could pick these questions: ranked by mean student entropy over their 4 answers, the 360 questions order almost as they do by KL (Spearman 0.93), and 101 of the 120 highest-entropy questions are also in the high-KL third, against 40 by chance. % src: experiments/p2b-analysis/qent_proxy.txt (offline, round-0 qkl pool)
 So high-KL questions and both-wrong questions overlap but are not the same thing: the both-wrong arm trained on answers with ordinary KL (0.105 nats, random 0.104), while the high-KL arm trained on 0.129 nats.
 This also fits the literature: hard questions help \citep{hou2026whatmatters}, but a bucket of failed questions on its own does not \citep{yang2026correcting}. % src: tex_rows.tex trained-set rows (s1_analysis.json selected, mean over 4 refreshes)
 
@@ -339,7 +340,7 @@ The sizes of the question-level effects are what the next runs will pin down:
 \item a best-checkpoint pick on 200 held-out training-distribution questions, as pre-registered;
 \item re-evaluation at a 16k or 32k budget, to check that the ranking holds with more room to think;
 \item a token-level map of where the KL sits in high-KL questions, which needs no new training;
-\item a teacher-free question score (the student's mean entropy over 4 rollouts tracks question KL in Table~\ref{tab:signals}) that would make the rule cheap.
+\item training on the questions with the highest student entropy, which picks nearly the same questions as high KL (\S\ref{sec:analysis}) without any teacher pass and would make the rule cheap.
 \end{enumerate}
 
 %=====================================================================

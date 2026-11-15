@@ -1,0 +1,2 @@
+qkl pool r0 (360q x4): n=360 Spearman(q-entropy, q-KL)=0.926; top-third overlap 101/120 (chance 40)
+rollout pool r0 (120q x12): n=120 Spearman(q-entropy, q-KL)=0.936; top-third overlap 34/40 (chance 13)
