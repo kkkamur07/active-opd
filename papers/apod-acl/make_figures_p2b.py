@@ -43,20 +43,21 @@ def save(fig, stem):
         fig.savefig(FIG / f"{stem}.{ext}", dpi=300)
     plt.close(fig)
 
-# ---- Fig 1: forest plot, curve-mean difference vs random (steps 15-60), 95% paired bootstrap (test noise only)
+# ---- Fig 1: curve-mean difference vs random (steps 15-60), point estimates
 fig, ax = plt.subplots(figsize=(3.2, 3.5))
 y = 0; yt, yl, bold = [], [], []
 for gname, arms, col in GROUPS:
     yt.append(y); yl.append(gname); bold.append(True); y -= 1
     for a in arms:
-        o, lo, hi = CI[a]
-        ax.plot([lo, hi], [y, y], color=col, lw=1.6, solid_capstyle="round")
+        o = CI[a][0]   # point estimate only (no bootstrap range, USER 2026-11-15)
+        ax.plot([0, o], [y, y], color=col, lw=1.6, solid_capstyle="round")
         ax.plot(o, y, "o", color=col, ms=4.5)
-        ax.annotate(f"{o:+.1f}", (hi, y), xytext=(3, 0), textcoords="offset points", va="center", fontsize=7)
+        ax.annotate(f"{o:+.1f}", (o, y), xytext=(5 if o >= 0 else -5, 0), textcoords="offset points",
+                    va="center", ha="left" if o >= 0 else "right", fontsize=7)
         yt.append(y); yl.append(NAME[a].replace("Rollout ", "").replace("Question ", "")); bold.append(False); y -= 1
     y -= 0.4
 ax.axvline(0, color=PALETTE["red_strong"], lw=1.0, ls="--")
-ax.set_yticks(yt, yl); ax.set_xlim(-3.2, 3.4)
+ax.set_yticks(yt, yl); ax.set_xlim(-2.8, 2.6)
 for t, b in zip(ax.get_yticklabels(), bold):
     if b: t.set_fontweight("bold")
 ax.set_xlabel("Difference from random (pts)")
