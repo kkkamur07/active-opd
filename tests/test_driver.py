@@ -32,7 +32,7 @@ from apod import paths
 from apod.bank import BUCKETS
 from apod.datasets.io import read_jsonl, write_jsonl
 from apod.driver import Driver, budget_from, compose_config, prepare_config, run
-from apod.selection import KL_TERTILES
+from apod.selection import KL_TERTILES, needs_entropy
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENTS = ("r1_correctness_8k", "r2_trajsel_8k", "r3_qentropy_8k", "r4_qentropy_low_8k")
@@ -163,7 +163,7 @@ def _check_full_run(experiment: str, out: Path, bank_rows: list[dict]) -> None:
                 assert l["gpus"] == _flag(l["cmd"], "--shard") and _flag(l["cmd"], "--num-shards") == "2"
         entropies = [l for l in mine if _stage(l["cmd"]) == "entropy"]
         oracles = [l for l in mine if _stage(l["cmd"]) == "oracle"]
-        assert bool(entropies) == (rule == "entropy_top_k"), (arm, rule)
+        assert bool(entropies) == needs_entropy(rule), (arm, rule)
         assert bool(oracles) == (rule in KL_TERTILES), (arm, rule)
         assert all("--estimator" in l["cmd"] and _flag(l["cmd"], "--estimator") == "exact" for l in oracles)
         for l in oracles:

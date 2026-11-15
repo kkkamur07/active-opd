@@ -1,0 +1,29 @@
+# @package _global_
+# 2B program, lever 3: WHICH QUESTIONS by KL. 360 questions x 4 rollouts per
+# refresh (the same 1,440 generations as the rollout arms); each question's KL
+# = mean exact reverse KL of its 4 rollouts; keep the high / middle / low third
+# of questions (120) with all 4 rollouts each = 480 trained per refresh.
+# The three arms share the step-0 pool.
+defaults:
+  - p2b_base
+  - _self_
+
+run_name: p2b-qkl-s1
+
+driver:
+  question_oversample: 3
+  arms:
+    qkl_mid:
+      question_source: bank_labelled
+      selection: qkl_mid
+    qkl_high:
+      question_source: bank_labelled
+      selection: qkl_high
+    qkl_low:
+      question_source: bank_labelled
+      selection: qkl_low
+
+rollout:
+  num_rollouts: 4
+selection:
+  k: 4

@@ -11,6 +11,12 @@ Rules (the ``arm`` argument; the step-based driver maps arm names to rules):
   entropy_top_k  the k highest trajectory-entropy rollouts
   kl_high/mid/low the top / middle / bottom k by exact reverse KL among the
                  first 3k rollouts ranked by KL (kl50's tertile rule)
+  qkl_high/mid/low  question level: rank questions by the mean exact reverse KL
+                 of their rollouts, keep every rollout of the top / middle /
+                 bottom third of questions
+  qent_high/mid/low question level, same tertile rule, but each question is
+                 scored by the mean entropy-stage ``entropy`` of its rollouts
+                 (student only: no teacher pass needed to select)
 The pre-2026-09-01 arm names (entropy_top4, random_top4, all) remain valid
 aliases so apod.main and older run dirs keep working.
 """
@@ -23,13 +29,24 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
-RULES = ("all_k", "random_k", "entropy_top_k", "kl_high", "kl_mid", "kl_low", "qkl_high", "qkl_mid", "qkl_low")
+RULES = (
+    "all_k", "random_k", "entropy_top_k", "kl_high", "kl_mid", "kl_low",
+    "qkl_high", "qkl_mid", "qkl_low", "qent_high", "qent_mid", "qent_low",
+)
 KL_TERTILES = ("kl_high", "kl_mid", "kl_low")
 # Question-level selection (2026-11-13): each question's KL = mean exact reverse KL
 # of its rollouts; questions ranked descending, cut into thirds; the arm keeps
 # EVERY rollout of the questions in its third (k must equal num_rollouts and the
 # driver over-samples questions 3x: driver.question_oversample=3).
 QKL_TERTILES = ("qkl_high", "qkl_mid", "qkl_low")
+# Question-level selection by student entropy (2026-11-15): identical tertile
+# rule, but each question's score = mean entropy-stage entropy of its rollouts.
+QENT_TERTILES = ("qent_high", "qent_mid", "qent_low")
+# rule -> (tertile names, per-rollout score key, per-question field on selected rows)
+QUESTION_RULES = {
+    **{r: (QKL_TERTILES, "mean_reverse_kl", "question_kl") for r in QKL_TERTILES},
+    **{r: (QENT_TERTILES, "entropy", "question_entropy") for r in QENT_TERTILES},
+}
 LEGACY_RULES = {"entropy_top4": "entropy_top_k", "random_top4": "random_k", "all": "all_k"}
 ARMS = tuple(LEGACY_RULES) + RULES
 
@@ -44,7 +61,7 @@ def canonical_rule(arm: str) -> str:
 
 
 def needs_entropy(arm: str) -> bool:
-    return canonical_rule(arm) == "entropy_top_k"
+    return canonical_rule(arm) == "entropy_top_k" or canonical_rule(arm) in QENT_TERTILES
 
 
 def needs_reverse_kl(arm: str) -> bool:
@@ -52,7 +69,7 @@ def needs_reverse_kl(arm: str) -> bool:
 
 
 def is_question_rule(arm: str) -> bool:
-    return canonical_rule(arm) in QKL_TERTILES
+    return canonical_rule(arm) in QUESTION_RULES
 
 
 def _selected_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -94,6 +111,10 @@ def select_trajectories(
       random_k:      default_rng(seed + example_index).choice, no replacement
       kl_high/mid/low: rank by mean_reverse_kl descending (ties -> lower
                      rollout_index); slice [0,k) / [k,2k) / [2k,3k)
+      qkl_* / qent_*: question level -- score each question by the mean
+                     mean_reverse_kl (qkl) or entropy (qent) of its rollouts,
+                     rank descending (ties -> lower example_index), keep every
+                     rollout of the high / middle / low third of questions
       all_k:         keep everything
     Truncated rows are eligible. Returns selected.jsonl-shaped rows sorted
     by (example_index, rollout_index).
@@ -105,24 +126,25 @@ def select_trajectories(
     for row in trajectories:
         by_example[row["example_index"]].append(row)
 
-    if rule in QKL_TERTILES:
+    if rule in QUESTION_RULES:
+        tertiles, score_key, field = QUESTION_RULES[rule]
         if k != num_rollouts:
             raise ValueError(f"rule {rule!r} keeps every rollout of a question: k={k} must equal num_rollouts={num_rollouts}")
         if len(by_example) % 3:
             raise ValueError(f"rule {rule!r}: {len(by_example)} questions is not a multiple of 3")
-        question_kl = {}
+        question_score = {}
         for example_index, rows in by_example.items():
-            _require_score(rows, "mean_reverse_kl", rule, example_index)
-            question_kl[example_index] = float(np.mean([r["mean_reverse_kl"] for r in rows]))
-        ranked = sorted(by_example, key=lambda e: (-question_kl[e], e))
+            _require_score(rows, score_key, rule, example_index)
+            question_score[example_index] = float(np.mean([r[score_key] for r in rows]))
+        ranked = sorted(by_example, key=lambda e: (-question_score[e], e))
         third = len(ranked) // 3
-        tertile = QKL_TERTILES.index(rule)
+        tertile = tertiles.index(rule)
         keep = sorted(ranked[tertile * third : (tertile + 1) * third])
         out = []
         for example_index in keep:
             for r in sorted(by_example[example_index], key=lambda r: r["rollout_index"]):
                 row = _selected_row(r)
-                row["question_kl"] = question_kl[example_index]
+                row[field] = question_score[example_index]
                 out.append(row)
         return out
 
@@ -235,5 +257,53 @@ if __name__ == "__main__":
         raise AssertionError("kl tertiles need 3k rows")
     assert needs_reverse_kl("kl_low") and not needs_reverse_kl("random_k")
     assert needs_entropy("entropy_top4") and not needs_entropy("all_k")
+
+    # Question-level tertiles (qkl_* by KL, qent_* by entropy): 6 questions x 2
+    # rollouts, k = num_rollouts = 2 -> each third = 2 questions, all rollouts kept.
+    # Per-question means (exact binary fractions, so ties are exact):
+    #   KL   q0 .5    q1 .125  q2 .875  q3 .25   q4 .75   q5 .25
+    #   ent  q0 .25   q1 .875  q2 .5    q3 .625  q4 .125  q5 .625
+    # (q3/q5 tie in both -> lower example_index ranks first.)
+    qkl = {0: (.25, .75), 1: (.125, .125), 2: (.75, 1.), 3: (.25, .25), 4: (.75, .75), 5: (.125, .375)}
+    qent = {0: (.125, .375), 1: (.875, .875), 2: (.5, .5), 3: (.5, .75), 4: (.125, .125), 5: (.625, .625)}
+    q_rows = [
+        {"example_index": e, "rollout_index": j, "mean_reverse_kl": qkl[e][j], "entropy": qent[e][j],
+         "correct": False, "truncated": False, "response_length": 7}
+        for e in range(6) for j in range(2)
+    ]
+    def _qpick(rule, rows=q_rows):
+        out = select_trajectories(rule, rows, k=2, num_rollouts=2, seed=0)
+        assert len(out) == 4 and all(sum(1 for r in out if r["example_index"] == e) == 2 for e in {r["example_index"] for r in out})
+        return sorted({r["example_index"] for r in out})
+    assert {r: _qpick(r) for r in QKL_TERTILES} == {"qkl_high": [2, 4], "qkl_mid": [0, 3], "qkl_low": [1, 5]}
+    assert {r: _qpick(r) for r in QENT_TERTILES} == {"qent_high": [1, 3], "qent_mid": [2, 5], "qent_low": [0, 4]}
+    hi = select_trajectories("qent_high", q_rows, k=2, num_rollouts=2, seed=0)
+    assert all(abs(r["question_entropy"] - float(np.mean(qent[r["example_index"]]))) < 1e-12 for r in hi)
+    assert "question_kl" not in hi[0]
+    assert "question_entropy" not in select_trajectories("qkl_high", q_rows, k=2, num_rollouts=2, seed=0)[0]
+    # qent ignores KL entirely: scrambling KL leaves qent picks unchanged.
+    scrambled = [{**r, "mean_reverse_kl": 1.0 - r["mean_reverse_kl"]} for r in q_rows]
+    assert all(_qpick(r, scrambled) == _qpick(r) for r in QENT_TERTILES)
+    # Scores and shape requirements.
+    for rule, drop in (("qent_mid", "entropy"), ("qkl_mid", "mean_reverse_kl")):
+        try:
+            select_trajectories(rule, [{**r, drop: None} for r in q_rows], k=2, num_rollouts=2, seed=0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{rule} without {drop} must raise")
+    no_kl = [{k_: v for k_, v in r.items() if k_ != "mean_reverse_kl"} for r in q_rows]
+    assert _qpick("qent_low", no_kl) == [0, 4], "qent must not need reverse KL"
+    for bad in (dict(rows=q_rows[:10], k=2, n=2), dict(rows=q_rows, k=1, n=2)):
+        try:
+            select_trajectories("qent_high", bad["rows"], k=bad["k"], num_rollouts=bad["n"], seed=0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("qent needs a multiple of 3 questions and k == num_rollouts")
+    assert all(is_question_rule(r) for r in QKL_TERTILES + QENT_TERTILES)
+    assert not is_question_rule("kl_high") and not is_question_rule("entropy_top_k")
+    assert all(needs_entropy(r) and not needs_reverse_kl(r) for r in QENT_TERTILES)
+    assert all(needs_reverse_kl(r) and not needs_entropy(r) for r in QKL_TERTILES)
 
     print("apod/selection.py self-test passed")
