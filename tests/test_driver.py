@@ -377,6 +377,37 @@ def test_plot_cli() -> None:
     shutil.rmtree(bank)
 
 
+def test_exclude_questions_from() -> None:
+    """A later seed drops every question an earlier run used, even when the
+    bank has new bucket members inserted among the old ones (widened bank)."""
+
+    from apod.driver import select_questions, used_question_ids
+
+    bank = _tmp("excl-bank")
+    rows = _write_bank(bank, per_bucket=40)
+    bucket = "both_right"
+    members = [r for r in rows if r["bucket"] == bucket]
+    first = select_questions(f"bank_bucket:{bucket}", n=10, seed=0, bank_dir=bank, dry_run=True)
+    run_dir = _tmp("excl-run")
+    write_jsonl(run_dir / "pool" / f"questions_{bucket}.jsonl",
+                [{"id": q["id"], "example_index": i} for i, q in enumerate(first)])
+    # widen: a new bucket member at the front of pool order.
+    write_jsonl(bank / "questions.jsonl", [{**members[0], "id": "new-0", "example_index": -1}, *rows])
+    used = used_question_ids([run_dir])
+    assert used == {q["id"] for q in first}
+    second = select_questions(f"bank_bucket:{bucket}", n=10, seed=0, bank_dir=bank, dry_run=True, exclude_ids=used)
+    assert not {q["id"] for q in second} & used
+    assert [q["id"] for q in second] == ["new-0"] + [r["id"] for r in members[10:19]]
+    try:
+        used_question_ids([bank / "missing"])
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a run dir without pool files must raise")
+    shutil.rmtree(bank)
+    shutil.rmtree(run_dir)
+
+
 def test_selection_self_test() -> None:
     subprocess.run([sys.executable, str(ROOT / "apod" / "selection.py")], check=True, cwd=ROOT)
 

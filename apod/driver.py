@@ -195,6 +195,19 @@ def _from_bank(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def used_question_ids(run_dirs) -> frozenset[str]:
+    """Ids of every question in ``<run>/pool/questions_*.jsonl`` of each run dir."""
+
+    ids: set[str] = set()
+    for run_dir in run_dirs:
+        files = sorted(Path(str(run_dir)).glob("pool/questions_*.jsonl"))
+        if not files:
+            raise FileNotFoundError(f"driver.exclude_questions_from: no pool/questions_*.jsonl in {run_dir}")
+        for path in files:
+            ids.update(str(row["id"]) for row in read_jsonl(path))
+    return frozenset(ids)
+
+
 def parse_source(source: str) -> tuple[str, str]:
     """``(kind, bucket)`` of a question source string; bucket is '' unless bank_bucket."""
 
@@ -209,7 +222,7 @@ def parse_source(source: str) -> tuple[str, str]:
 
 def select_questions(
     source: str, *, n: int, seed: int, bank_dir: Path, dry_run: bool, data_cfg: DictConfig | None = None,
-    offset: int = 0,
+    offset: int = 0, exclude_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The arm's n questions under ``source`` (conf/driver.yaml).
 
@@ -259,6 +272,10 @@ def select_questions(
         candidates = [r for r in rows if r.get("teacher_label") is not None]
     else:
         candidates = [r for r in rows if r.get("question_entropy") is not None]
+    # driver.exclude_questions_from: drop every question an earlier run used
+    # (a widened bank inserts new bucket members among old ones, so an offset
+    # alone would no longer skip exactly the earlier seed's questions).
+    candidates = [r for r in candidates if str(r["id"]) not in exclude_ids]
     # driver.question_offset: skip the first `offset` candidates (fresh
     # questions for a later seed without re-ordering the bank).
     candidates = candidates[offset:]
@@ -454,6 +471,7 @@ class Driver:
             dry_run=self.dry_run,
             data_cfg=self.cfg.data,
             offset=int(self.cfg.driver.get("question_offset", 0)),
+            exclude_ids=used_question_ids(self.cfg.driver.get("exclude_questions_from") or []),
         )
         rows = []
         for i, q in enumerate(questions):
