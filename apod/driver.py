@@ -385,7 +385,7 @@ class Driver:
             if is_question_rule(spec["selection"]) != (self.budget.question_oversample == 3):
                 raise ValueError(
                     f"arm {name}: rule {spec['selection']} with driver.question_oversample="
-                    f"{self.budget.question_oversample}; question rules (qkl_*, qent_*) need 3, every other rule 1 (separate run dirs)"
+                    f"{self.budget.question_oversample}; question rules (qkl_*, qent_*, qent1_*) need 3, every other rule 1 (separate run dirs)"
                 )
         self.score_all = bool(cfg.driver.get("score_all", False))
         self.keep_all_weights = bool(cfg.driver.get("keep_all_weights", False))

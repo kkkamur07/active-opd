@@ -1,0 +1,11 @@
+p2b-qent1 (seeds s1/s2/s3) -- pre-registration, written 2026-11-16 ~18:10 UTC before any qent1 run.
+
+Question: does scoring question entropy from ONE rollout (rollout_index 0) train as well as the 4-rollout mean (qent_high)?
+Arm: qent1_high only. Same 360-question pools as p2b-qkl-sN / p2b-qent-sN (same seed + offset; step 0 reused from p2b-qkl-sN).
+Trains on all 4 rollouts of the chosen 120 questions (480 per refresh), like qent_high.
+
+Primary: qent1_high - qent_high, same seed, mean MATH-500 strict avg@4 over steps 15/30/45/60.
+Secondary: qent1_high - random (same seed, p2b-rollout-sN random arm), same metric.
+Reported per step: strict avg@4, pass@4; per refresh: overlap (of 120) of qent1_high's questions with the qent_high rule's pick from the same pool.
+Offline expectation (p2b-qent-s1 logs): single-rollout top third shares 96-107 of 120 questions with the 4-rollout mean's.
+Point estimates per seed, no CIs; no verdict from one seed.
