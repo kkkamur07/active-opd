@@ -41,7 +41,7 @@ does not matter.
 
 Training on the third of questions the student is most uncertain about beats random in all three seeds, by +1.02 points on
 average. The rule needs no teacher: it uses the student's own entropy, and scoring each question from a single answer works
-just as well (+1.08, above random in all three seeds, with the smallest seed-to-seed spread of any question rule). The
+just as well (+1.08, above random in all three seeds). The
 middle and low thirds lose 0.47 and 0.56 points. Question uncertainty picks almost the same questions as teacher KL (in seed
 1, 99 to 106 of 120 per refresh), and the two rules give the same gain (+1.02 and +1.09). So the student can find the useful
 questions itself, at the cost of one sampled answer per candidate.
