@@ -1,0 +1,23 @@
+arm               s1 avg   s1 d  s2 avg   s2 d  mean d | s1 pass d s2 pass d
+random s1: avg 42.51 pass 54.35
+random s2: avg 42.25 pass 54.30
+kl_high            42.17  -0.34   41.92  -0.33   -0.33 |     +0.50     -0.30
+kl_mid             42.21  -0.30   42.77  +0.52   +0.11 |     +0.35     +0.70
+kl_low             42.76  +0.25   41.58  -0.67   -0.21 |     +0.70     -0.30
+ent_top4           42.45  -0.06    n/a    n/a     n/a |     -0.05       n/a
+qkl_high           44.20  +1.69   43.70  +1.45   +1.57 |     +2.20     +1.75
+qkl_mid            42.34  -0.18   42.09  -0.16   -0.17 |     +1.00     +0.35
+qkl_low            40.59  -1.93   42.42  +0.17   -0.88 |     -1.60     +0.10
+qent_high          43.86  +1.35    n/a    n/a     n/a |     +1.60       n/a
+qent_mid           42.22  -0.29    n/a    n/a     n/a |     +0.70       n/a
+qent_low           41.80  -0.71    n/a    n/a     n/a |     -0.70       n/a
+t_right_s_wrong    43.41  +0.90    n/a    n/a     n/a |     +1.60       n/a
+both_right         43.31  +0.80    n/a    n/a     n/a |     +1.20       n/a
+mixed              42.59  +0.07    n/a    n/a     n/a |     +0.65       n/a
+both_wrong         40.80  -1.71    n/a    n/a     n/a |     -0.65       n/a
+
+qent_high: overlap with the questions qkl_high would pick from the same pool (of 120)
+  refresh 0: 360 questions, overlap 101/120
+  refresh 1: 360 questions, overlap 106/120
+  refresh 2: 360 questions, overlap 101/120
+  refresh 3: 360 questions, overlap 99/120
