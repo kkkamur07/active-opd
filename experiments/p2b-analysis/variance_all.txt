@@ -1,0 +1,13 @@
+seed 1 refresh 0: 120 q, 1440 answers | KL between 84.6% | entropy between 85.8%
+seed 1 refresh 1: 120 q, 1440 answers | KL between 85.1% | entropy between 82.9%
+seed 1 refresh 2: 120 q, 1440 answers | KL between 80.0% | entropy between 75.6%
+seed 1 refresh 3: 120 q, 1440 answers | KL between 82.1% | entropy between 77.0%
+seed 2 refresh 0: 120 q, 1440 answers | KL between 85.2% | entropy between 87.2%
+seed 2 refresh 1: 120 q, 1440 answers | KL between 83.4% | entropy between 82.4%
+seed 2 refresh 2: 120 q, 1440 answers | KL between 81.6% | entropy between 78.4%
+seed 2 refresh 3: 120 q, 1440 answers | KL between 81.6% | entropy between 79.0%
+seed 3 refresh 0: 120 q, 1440 answers | KL between 82.1% | entropy between 84.0%
+seed 3 refresh 1: 120 q, 1440 answers | KL between 77.2% | entropy between 73.4%
+seed 3 refresh 2: 120 q, 1440 answers | KL between 83.8% | entropy between 82.6%
+seed 3 refresh 3: 120 q, 1440 answers | KL between 80.7% | entropy between 78.2%
+ALL 12 pools: KL between 77.2-85.2% (mean 82.3%); entropy between 73.4-87.2% (mean 80.5%)

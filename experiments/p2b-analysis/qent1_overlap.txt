@@ -1,0 +1,14 @@
+qent1_high: per refresh, of the 120 questions picked by single-answer entropy (rollout 0),
+how many are also in the top third by 4-answer mean KL (teacher rule) and by 4-answer mean entropy; chance = 40
+  seed 1 refresh 0: n=360 single-vs-KL 97/120  single-vs-4ans-entropy 107/120
+  seed 1 refresh 1: n=360 single-vs-KL 93/120  single-vs-4ans-entropy 100/120
+  seed 1 refresh 2: n=360 single-vs-KL 90/120  single-vs-4ans-entropy 99/120
+  seed 1 refresh 3: n=360 single-vs-KL 95/120  single-vs-4ans-entropy 97/120
+  seed 2 refresh 0: n=360 single-vs-KL 102/120  single-vs-4ans-entropy 108/120
+  seed 2 refresh 1: n=360 single-vs-KL 92/120  single-vs-4ans-entropy 101/120
+  seed 2 refresh 2: n=360 single-vs-KL 96/120  single-vs-4ans-entropy 103/120
+  seed 2 refresh 3: n=360 single-vs-KL 97/120  single-vs-4ans-entropy 105/120
+  seed 3 refresh 0: n=360 single-vs-KL 96/120  single-vs-4ans-entropy 107/120
+  seed 3 refresh 1: n=360 single-vs-KL 99/120  single-vs-4ans-entropy 103/120
+  seed 3 refresh 2: n=360 single-vs-KL 89/120  single-vs-4ans-entropy 104/120
+  seed 3 refresh 3: n=360 single-vs-KL 66/120  single-vs-4ans-entropy 75/120
