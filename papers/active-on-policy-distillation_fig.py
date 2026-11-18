@@ -2,7 +2,7 @@
 papers/apod-acl/make_figures.py). Run from the repo root:
     uv run --no-project --with matplotlib python papers/active-on-policy-distillation_fig.py
 fig1 = copy of papers/apod-acl/figures/p2b_method.png (schematic, no data; made by papers/apod-acl/make_figures_p2b.py).
-fig2 data: experiments/p2b-analysis/three_seeds.txt (per-seed values and exact 3-seed means, copied verbatim below).
+fig2 data: experiments/p2b-analysis/three_seeds_exact.txt (per-seed values and exact 3-seed means, copied verbatim below).
 fig3 data: experiments/p2b-analysis/variance_all.txt (between-question variance share, 12 answer-level pools).
 """
 import shutil
@@ -23,10 +23,10 @@ shutil.copy("papers/apod-acl/figures/p2b_method.pdf", f"{OUT}1.pdf")
 # fig2: (level, label, seed1, seed2, seed3, exact 3-seed mean) from three_seeds.txt
 rows = [("q", "Teacher right, student wrong", +0.90, +1.24, +1.53, +1.22), ("q", "Teacher-student KL high", +1.69, +1.45, +0.13, +1.09),
         ("q", "Student entropy high (1 answer)", +1.34, +1.06, +0.83, +1.08), ("q", "Both right", +0.80, +1.10, +0.84, +0.91),
-        ("q", "Mixed", +0.07, +0.41, +0.34, +0.27), ("q", "Teacher-student KL middle", -0.18, -0.16, -0.40, -0.25),
-        ("q", "Teacher-student KL low", -1.93, +0.17, -1.42, -1.06), ("q", "Both wrong", -1.71, -0.23, -1.85, -1.26),
-        ("a", "KL high", -0.34, -0.33, -0.15, -0.27), ("a", "KL middle", -0.30, +0.52, -0.26, -0.01),
-        ("a", "KL low", +0.25, -0.67, +0.05, -0.12), ("a", "Entropy high", -0.06, +0.04, -0.35, -0.13)]
+        ("q", "Mixed", +0.08, +0.41, +0.34, +0.28), ("q", "Teacher-student KL middle", -0.18, -0.16, -0.40, -0.25),
+        ("q", "Teacher-student KL low", -1.93, +0.18, -1.43, -1.06), ("q", "Both wrong", -1.71, -0.23, -1.85, -1.26),
+        ("a", "KL high", -0.34, -0.33, -0.15, -0.27), ("a", "KL middle", -0.30, +0.53, -0.26, -0.01),
+        ("a", "KL low", +0.25, -0.68, +0.05, -0.13), ("a", "Entropy high", -0.06, +0.04, -0.35, -0.13)]
 fig, ax = plt.subplots(figsize=(4.6, 4.3)); y = 0; yt, yl, bold = [], [], []
 for lev, title, col in [("q", "Choosing questions", P["blue_main"]), ("a", "Choosing answers", P["teal"])]:
     yt.append(y); yl.append(title); bold.append(True); y -= 1
