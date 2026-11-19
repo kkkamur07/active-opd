@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 
 from apod.stages.train import K_OVERLAP, adam_bf16_rounded, batch_diagnostics
-from scripts.oracle_kl import _exact_scores
+from apod.stages.teacher_kl import _exact_scores
 
 
 def _brute_force(s_hidden, s_weight, t_hidden, t_weight, labels):

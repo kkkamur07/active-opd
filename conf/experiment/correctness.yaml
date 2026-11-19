@@ -1,0 +1,30 @@
+# @package _global_
+# Question-level selection by correctness: 120 questions x 4 answers per refresh
+# from one bucket of the question bank (labels from 4 base-student and 4 teacher
+# answers; solved if >= 3/4 correct, failed if <= 1/4), all 4 answers trained.
+#   python -m apod.pipeline +experiment=correctness
+defaults:
+  - base
+  - _self_
+
+run_name: correctness-s1
+
+driver:
+  arms:
+    t_right_s_wrong:
+      question_source: bank_bucket:teacher_right_student_wrong
+      selection: all_k
+    both_right:
+      question_source: bank_bucket:both_right
+      selection: all_k
+    both_wrong:
+      question_source: bank_bucket:both_wrong
+      selection: all_k
+    mixed:
+      question_source: bank_bucket:mixed
+      selection: all_k
+
+rollout:
+  num_rollouts: 4
+selection:
+  k: 4

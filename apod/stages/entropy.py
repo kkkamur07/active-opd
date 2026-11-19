@@ -29,7 +29,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from apod import paths
-from apod.datasets import append_jsonl, read_jsonl, write_jsonl
+from apod.data import append_jsonl, read_jsonl, write_jsonl
 from apod.models import load_lm
 from apod.stages.common import parse_stage_args, stage_parser
 
@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Same resolution (and weights-present check) as rollout_eval and train.
-    from apod.stages.rollout_eval import resolve_model_path
+    from apod.stages.generate import resolve_model_path
 
     model_path = resolve_model_path(run_dir, args.arm, args.round_index, cfg)
     # Entropy must be the GENERATING policy's uncertainty: scoring under any

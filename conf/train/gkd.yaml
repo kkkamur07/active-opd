@@ -67,7 +67,7 @@ train_gpu: 0             # fallback GPU when num_gpus == 1; with num_gpus > 1
 # --- per-step diagnostics on the training batch (docs/decisions.md 2026-09-01)
 # Logged with loss/grad_norm/lr into train/log_history.jsonl (and W&B):
 # overlap_ratio_top16, overlap_adv_top16 (Rethinking OPD Eq. 6-7, exactly as
-# scripts/oracle_kl.py), abs_entropy_gap (mean |H_S - H_T| per response
+# apod/stages/teacher_kl.py), abs_entropy_gap (mean |H_S - H_T| per response
 # token), response_tokens, cap_hit_frac. Computed in no_grad by a chunked
 # lm_head pass over the SAME hidden states the Liger fused loss consumes;
 # never touches the loss or the optimizer trajectory. Also every step, from

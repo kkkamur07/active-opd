@@ -49,11 +49,11 @@ from trl.experimental.gkd import gkd_trainer as _gkd_module
 from trl.experimental.utils import DataCollatorForChatML
 
 from apod import tracking
-from apod.datasets.io import read_jsonl, write_jsonl
+from apod.data.io import read_jsonl, write_jsonl
 from apod.paths import round_dir
 from apod.stages.common import parse_stage_args, stage_parser
 
-K_OVERLAP = 16  # Rethinking OPD's trained k for Eq. 6-7; the same constant as scripts/oracle_kl.py
+K_OVERLAP = 16  # Rethinking OPD's trained k for Eq. 6-7; the same constant as apod/stages/teacher_kl.py
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,7 +171,7 @@ def batch_diagnostics(
     tokens]``: per token |top16_S cap top16_T|, the teacher's advantage on the
     intersection with both distributions renormalized over it (counted only
     where the intersection is non-empty: ``adv_n``), and |H_S - H_T|. The
-    per-token math is scripts/oracle_kl.py's ``_exact_scores`` verbatim (fp32
+    per-token math is apod/stages/teacher_kl.py's ``_exact_scores`` verbatim (fp32
     log-softmax over bf16 logits); the means are the sums over ``tokens``
     (and ``K_OVERLAP * tokens`` for the ratio), i.e. token-weighted over the
     batch rather than per trajectory.
@@ -469,7 +469,7 @@ def main() -> None:
 
     # Same resolution (and same weights-present check) as the rollout and
     # entropy stages -- one implementation, three consumers.
-    from apod.stages.rollout_eval import collect_eos_ids, resolve_model_path
+    from apod.stages.generate import collect_eos_ids, resolve_model_path
 
     model_path = resolve_model_path(run_dir, args.arm, args.round_index, cfg)
     logger.info(

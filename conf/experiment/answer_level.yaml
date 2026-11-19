@@ -1,0 +1,36 @@
+# @package _global_
+# Answer-level selection: 120 questions x 12 answers per refresh, keep 4 answers
+# per question (480 trained). Arms: random (standard on-policy distillation, the
+# baseline of every rule), reverse-KL ranks 1-4 / 5-8 / 9-12, and the 4 answers
+# with the highest student entropy. This run also makes the base-model MATH-500
+# evaluation that the other runs reuse.
+#   python -m apod.pipeline +experiment=answer_level
+defaults:
+  - base
+  - _self_
+
+run_name: answer-level-s1
+
+driver:
+  step0_eval_from: null          # this run makes the base-model evaluation
+  arms:
+    random:
+      question_source: bank_labelled
+      selection: random_k
+    kl_mid:
+      question_source: bank_labelled
+      selection: kl_mid
+    kl_high:
+      question_source: bank_labelled
+      selection: kl_high
+    kl_low:
+      question_source: bank_labelled
+      selection: kl_low
+    ent_top4:
+      question_source: bank_labelled
+      selection: entropy_top_k
+
+rollout:
+  num_rollouts: 12
+selection:
+  k: 4

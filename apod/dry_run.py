@@ -24,7 +24,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from apod import paths
-from apod.datasets.io import append_jsonl, read_jsonl, save_npz, write_jsonl
+from apod.data.io import append_jsonl, read_jsonl, save_npz, write_jsonl
 
 
 def _parse(cmd: list[str]) -> tuple[str, dict[str, Any]]:
@@ -39,8 +39,6 @@ def _parse(cmd: list[str]) -> tuple[str, dict[str, Any]]:
             stage = cmd[i + 1]  # the LAST -m wins: torchrun -m ... -m apod.stages.train
             i += 2
             continue
-        if tok.endswith("oracle_kl.py"):
-            stage = "oracle_kl"
         if tok.startswith("--"):
             key = tok[2:]
             values = []
@@ -69,11 +67,11 @@ def run_stub(cmd: list[str], run_dir: Path) -> None:
     cfg = OmegaConf.load(run_dir / "resolved_config.yaml")
     arm, refresh = args["arm"], int(args["round"])
     rdir = paths.round_dir(run_dir, arm, refresh)
-    if stage == "apod.stages.rollout_eval":
+    if stage == "apod.stages.generate":
         _rollout_eval(cfg, run_dir, rdir, arm, refresh, args)
     elif stage == "apod.stages.entropy":
         _entropy(rdir, int(args["shard"]), int(args["num-shards"]))
-    elif stage == "oracle_kl":
+    elif stage == "apod.stages.teacher_kl":
         _oracle(rdir, int(args["shard"]), int(args["num-shards"]), args.get("estimator", "exact"))
     elif stage == "apod.stages.train":
         _train(cfg, run_dir, rdir, arm, refresh, args)
@@ -190,7 +188,7 @@ def _oracle(rdir: Path, shard: int, num_shards: int, estimator: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
     stem = "oracle_kl_mc" if estimator == "mc" else "oracle_kl"
     path = out / f"{stem}.shard{shard}.jsonl"
-    # scripts/oracle_kl.py shards by POSITION in the sorted npz list, not by
+    # apod/stages/teacher_kl.py shards by POSITION in the sorted npz list, not by
     # example_index, and appends.
     for pos, (example_index, npz) in enumerate(_examples(rdir)):
         if pos % num_shards != shard:

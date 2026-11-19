@@ -2,7 +2,7 @@
 
 Interface defined in docs/pipeline.md. Pure CPU -- the caller merges the
 scores a rule needs (entropy from the entropy stage, reverse KL from
-scripts/oracle_kl.py) into the trajectory rows before calling. Truncated
+apod/stages/teacher_kl.py) into the trajectory rows before calling. Truncated
 (cap-hit) trajectories are eligible (ADR 0002).
 
 Rules (the ``arm`` argument; the step-based driver maps arm names to rules):

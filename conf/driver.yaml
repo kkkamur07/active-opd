@@ -1,5 +1,5 @@
 # @package driver
-# Step-based experiment driver (python -m apod.driver; ADR 0005/0006).
+# Step-based experiment driver (python -m apod.pipeline; ADR 0005/0006).
 # The budget is counted in training steps (one optimizer update at
 # train.effective_batch). Every refresh_every steps the driver evaluates the
 # current weights, rolls out the next block of questions from them, scores and
@@ -18,7 +18,7 @@ refresh_every: 10
 #   selection:       all_k | random_k | entropy_top_k | kl_high | kl_mid | kl_low
 arms: {}
 
-# Question bank directory (python -m apod.bank; conf/bank.yaml) for the
+# Question bank directory (python -m apod.question_bank; conf/bank.yaml) for the
 # bank_* question sources: apod.bank.load_bank reads its questions.jsonl,
 # one row per question (example_index, id, question, reference, bucket,
 # question_entropy, the student/teacher grades) in the pool's seeded order.
@@ -32,7 +32,7 @@ bank_dir: ${bank.dir}
 monitor_sets:
   - aime2526
 
-# scripts/oracle_kl.py --estimator for the kl_* rules: exact (full-vocab
+# apod/stages/teacher_kl.py --estimator for the kl_* rules: exact (full-vocab
 # reverse KL, the selection statistic of kl50) or mc (sampled-token estimate;
 # validated offline, docs/perf_review.md finding 4).
 kl_estimator: exact

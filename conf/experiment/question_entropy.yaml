@@ -1,0 +1,25 @@
+# @package _global_
+# Question-level selection by student uncertainty: 360 questions x 4 answers per
+# refresh; a question's score is the student's mean token entropy on ONE answer
+# (rollout 0), so no teacher pass is needed to score; keep the top third (120
+# questions with all 4 answers = 480 trained). Same seed and question offset as
+# question_kl, whose step-0 answers and scores it reuses.
+#   python -m apod.pipeline +experiment=question_entropy
+defaults:
+  - base
+  - _self_
+
+run_name: question-entropy-s1
+
+driver:
+  question_oversample: 3
+  step0_rollouts_from: [outputs/runs/question-kl-s1]
+  arms:
+    qent1_high:
+      question_source: bank_labelled
+      selection: qent1_high
+
+rollout:
+  num_rollouts: 4
+selection:
+  k: 4

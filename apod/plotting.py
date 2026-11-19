@@ -1,7 +1,7 @@
 """Plot accuracy vs training step (contract: docs/pipeline.md).
 
 Reads metrics.jsonl and renders plots/accuracy_vs_steps.png. Two row
-schemas: ``plot_refresh_curves`` for apod.driver runs (one row per (arm,
+schemas: ``plot_refresh_curves`` for apod.pipeline runs (one row per (arm,
 step), strict avg@n per eval set with a noise band, cap-hit panel) and
 ``plot_results`` for apod.main runs (one row per (arm, round), avg@n on
 top, pass@n below). Stacked panels sharing the x-axis -- never a dual-axis
@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from loguru import logger
 from omegaconf import OmegaConf
 
-from apod.datasets.io import read_jsonl
+from apod.data.io import read_jsonl
 
 # Fixed arm -> hue mapping (validated palette, slots 1-3 are all-pairs safe).
 # Color follows the entity: an arm keeps its hue regardless of which arms are
@@ -165,7 +165,7 @@ def plot_results(run_dir: Path) -> Path:
 
 
 def plot_refresh_curves(run_dir: Path, *, band_points: float = 5.0) -> Path:
-    """Curves of a step-based run (apod.driver): strict accuracy vs training step.
+    """Curves of a step-based run (apod.pipeline): strict accuracy vs training step.
 
     metrics.jsonl rows are one per (arm, step) with ``eval[<set>]`` summaries.
     Panels, sharing the step axis: strict avg@n on the primary set
@@ -254,7 +254,7 @@ def main() -> None:
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     rows = read_jsonl(run_dir / "metrics.jsonl")
-    if rows and "step" in rows[0]:  # apod.driver run: one row per (arm, step)
+    if rows and "step" in rows[0]:  # apod.pipeline run: one row per (arm, step)
         band = args.band_points
         if band is None:
             cfg_path = run_dir / "resolved_config.yaml"

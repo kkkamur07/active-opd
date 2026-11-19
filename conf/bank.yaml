@@ -3,7 +3,7 @@
 # OpenThoughts questions with 4 student rollouts each, strict 3-of-4 labels,
 # student question entropy H(q), and a NARROW teacher sweep (4 rollouts only
 # where the teacher's label can still fill a bucket). Built once by
-# `python -m apod.bank`; arms draw their questions from questions.jsonl.
+# `python -m apod.question_bank`; arms draw their questions from questions.jsonl.
 name: bank-8k
 dir: outputs/runs/${bank.name}
 # Rollouts per question per model and the cap they are generated at. The cap
@@ -20,7 +20,7 @@ wrong_max: 1
 # (one engine session per chunk per GPU), and every teacher chunk is the next
 # chunk_questions eligible questions in that same order. student_questions
 # and target_per_bucket may be raised on an existing bank
-# (`python -m apod.bank bank.student_questions=20000`); nothing else may.
+# (`python -m apod.question_bank bank.student_questions=20000`); nothing else may.
 chunk_questions: 1000
 student_questions: 14500
 target_per_bucket: 800

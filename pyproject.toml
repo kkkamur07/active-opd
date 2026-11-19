@@ -37,16 +37,12 @@ train = ["trl[vllm]==1.10.0", "wandb>=0.19"]
 # NOT bitwise-neutral (bf16-level): fresh runs only. See docs/kernels.md.
 kernels = ["flash-linear-attention==0.5.2"]
 
-[project.scripts]
-apod-lengths = "scripts.token_lengths:main"
-apod-report = "scripts.rollout_report:main"
-
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["apod", "scripts"]
+packages = ["apod"]
 
 # cu130, because vLLM 0.26.0's PyPI wheel is a CUDA 13 build: it depends on
 # nvidia-cutlass-dsl[cu13] and its _C_stable_libtorch extension links libcudart.so.13.

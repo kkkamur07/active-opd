@@ -1,0 +1,28 @@
+# @package _global_
+# Question-level selection by reverse KL: 360 questions x 4 answers per refresh;
+# a question's score is the mean reverse KL of its 4 answers; keep the high,
+# middle or low third (120 questions with all 4 answers = 480 trained).
+#   python -m apod.pipeline +experiment=question_kl
+defaults:
+  - base
+  - _self_
+
+run_name: question-kl-s1
+
+driver:
+  question_oversample: 3
+  arms:
+    qkl_mid:
+      question_source: bank_labelled
+      selection: qkl_mid
+    qkl_high:
+      question_source: bank_labelled
+      selection: qkl_high
+    qkl_low:
+      question_source: bank_labelled
+      selection: qkl_low
+
+rollout:
+  num_rollouts: 4
+selection:
+  k: 4

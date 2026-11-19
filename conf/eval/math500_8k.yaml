@@ -1,8 +1,0 @@
-# MATH-500 for the 4B program (USER 2026-11-13: eval at 8,192, the training cap):
-# all 500 x avg@4 at every refresh.
-dataset: math500
-num_problems: 500
-num_samples: 4
-intermediate_num_problems: 500
-eval_seed_offset: 100000
-max_new_tokens: 8192

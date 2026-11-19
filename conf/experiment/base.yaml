@@ -1,0 +1,46 @@
+# @package _global_
+# Shared regime of the final program (not runnable alone: the four experiment
+# files add the arms). Student Qwen3.5-2B, frozen teacher Qwen3.5-9B, bf16.
+# 60 training steps = 4 refreshes x 15 steps at effective batch 32 (480 answers
+# trained per refresh). Answers and MATH-500 evaluation are capped at 8,192 tokens;
+# MATH-500 is evaluated after every refresh. Every rule draws its questions from
+# the teacher-labeled pool of the question bank (python -m apod.question_bank).
+defaults:
+  - override /eval: math500
+  - _self_
+
+model:
+  student_id: Qwen/Qwen3.5-2B
+
+driver:
+  steps_total: 60
+  refresh_every: 15
+  monitor_sets: []
+  bank_dir: outputs/runs/bank-8k
+  score_all: true                # entropy and exact reverse KL on every answer of every rule (analysis)
+  keep_all_weights: true         # every refresh checkpoint is kept
+  step0_eval_from: outputs/runs/answer-level-s1/arms/random/rounds/round_00/eval   # base-model MATH-500, made by the answer-level run
+  step0_rollouts_from: null
+  question_offset: 0             # seed s uses a different offset, so seeds never share questions
+
+keep_checkpoints: 5
+
+sampling:
+  max_new_tokens: 8192
+engine:
+  max_model_len: 16384           # 8,192 answer tokens + prompt
+  gpu_memory_utilization: 0.92
+  target_concurrent_sequences: 384
+  chunk_sequences: 1024          # requests per llm.generate call
+
+train:
+  max_length: 16384
+  per_device_train_batch_size: 8   # x 2 accumulation x 2 GPUs = effective batch 32
+  gradient_accumulation_steps: 2
+  learning_rate: 3.1623e-06
+  total_training_steps: ${driver.steps_total}
+  warmup_steps: 3
+  lr_scheduler_type: cosine_with_min_lr
+  lr_scheduler_kwargs:
+    min_lr_rate: 0.1
+  persist_optimizer: true
