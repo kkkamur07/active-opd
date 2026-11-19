@@ -56,3 +56,30 @@ ax.set_xlabel("Pool (seed s, refresh r)")
 ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2)
 save(fig, 3)
 print("saved figs 1-3")
+
+# fig4 (plot A): MATH-500 strict avg@4 vs. training step, mean ± SD over 3 seeds.
+# data: experiments/p2b-analysis/curves_3seeds.json (exported from runs/p2b-*/metrics.jsonl, steps 0/15/30/45/60)
+import json
+C = json.load(open("experiments/p2b-analysis/curves_3seeds.json"))
+STEPS = [15, 30, 45, 60]
+def ms(arm):
+    v = np.array([[C[arm][s][str(t)] for t in STEPS] for s in ("1", "2", "3")])
+    return v.mean(0), v.std(0, ddof=1)
+panels = [("Choosing questions", [("t_right_s_wrong", "T right, S wrong", P["blue_main"]), ("qkl_high", "Rev. KL high", P["teal"]),
+                                  ("qent1_high", "Entropy high (1 answer)", "#9A4D8E"), ("both_wrong", "Both wrong", "#8BCF8B")]),
+          ("Choosing answers", [("kl_high", "Rev. KL high", P["blue_main"]), ("kl_mid", "Rev. KL middle", P["teal"]),
+                                ("kl_low", "Rev. KL low", "#9A4D8E"), ("ent_top4", "Entropy high", "#8BCF8B")])]
+fig, axs = plt.subplots(1, 2, figsize=(6.5, 2.5), sharey=True)
+for ax, (title, arms) in zip(axs, panels):
+    m, sd = ms("random")
+    ax.plot(STEPS, m, color=P["red_strong"], ls="--", lw=1.6, marker="o", ms=3, label="Standard OPD")
+    ax.fill_between(STEPS, m - sd, m + sd, color=P["red_strong"], alpha=0.12, lw=0)
+    for arm, lab, col in arms:
+        m, sd = ms(arm)
+        ax.plot(STEPS, m, color=col, lw=1.5, marker="o", ms=3, label=lab)
+        ax.fill_between(STEPS, m - sd, m + sd, color=col, alpha=0.12, lw=0)
+    ax.set_title(title, fontsize=8.5, fontweight="bold"); ax.set_xticks(STEPS); ax.set_xlabel("Training step")
+    ax.set_ylim(39, 47); ax.legend(loc="lower right", fontsize=6.5, handlelength=1.6)
+axs[0].set_ylabel("MATH-500 avg@4 (%)")
+save(fig, 4)
+print("saved fig4")

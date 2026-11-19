@@ -114,7 +114,8 @@ Our findings are:
 \citet{lu2025opd} describes on-policy distillation as a post-training recipe that pairs the student's own samples with dense, per-token teacher supervision, and \citet{song2026survey} survey the area.
 Recent work studies its mechanism \citep{li2026rethinking}, training from a single example \citep{fu2026onetraining}, teacher rollout selection \citep{zhang2026bestofn}, noisy teachers \citep{ding2026noisy}, multiple teachers \citep{ma2026mopd}, delta distillation \citep{heo2026delta} and representation distillation \citep{yang2026oprd}.
 These papers mostly change what the teacher provides or how the loss is formed.
-We keep the per-token reverse KL fixed and change only which student rollouts receive it.
+Where selection is studied in on-policy distillation, it is mostly done at the token level: selective on-policy distillation trains only at the token positions a selector scores highest \citep{zhu2026sharedlr}, and KL-based selection of tokens to correct outperforms random selection \citep{li2026demystifying}.
+We keep the per-token reverse KL fixed and instead select whole questions and answers.
 
 \paragraph{Data selection in on-policy distillation.}
 Recent papers disagree on which data on-policy distillation should use.
@@ -226,7 +227,15 @@ The score of a rule in one seed is its mean accuracy over steps 15 to 60, and we
 \label{sec:results}
 
 Standard on-policy distillation raises the student from 26.87\% to $42.58 \pm 0.37$\% (mean over steps 15 to 60).
-Table~\ref{tab:main} and Figure~\ref{fig:forest} compare every rule against it.
+Table~\ref{tab:main} and Figure~\ref{fig:forest} compare every rule against it, and Figure~\ref{fig:curves} shows accuracy over training.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/aopd_fig4.pdf}
+\caption{MATH-500 avg@4 over training, mean (line) $\pm$ SD (band) over three seeds, evaluated after every refresh. All rules start from the untrained student (26.87\%, not shown). Left: question-level rules stay above standard on-policy distillation (dashed) at every evaluation, and the both-wrong rule stays below it. Right: answer-level rules overlap standard on-policy distillation throughout.}
+\label{fig:curves}
+% src: experiments/p2b-analysis/curves_3seeds.json (from runs/p2b-*/metrics.jsonl); script papers/active-on-policy-distillation_fig.py (fig4)
+\end{figure*}
 % src: experiments/p2b-analysis/three_seeds_meansd.txt
 
 \begin{table}[t]
