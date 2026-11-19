@@ -61,7 +61,7 @@ This raises a simple question: what makes a rollout worth correcting?
 We test three candidate properties (correctness, reverse KL to the teacher, and student uncertainty) at two levels: which questions the student trains on, and which of its answers to a question are kept.
 With a Qwen3.5-2B student and a Qwen3.5-9B teacher on competition math, selecting questions improves over standard on-policy distillation on MATH-500.
 Questions the teacher solves and the student fails gain $+1.22 \pm 0.31$ points (mean $\pm$ SD over three seeds), questions with high reverse KL $+1.09 \pm 0.84$, and questions with high student entropy, scored from a single answer, $+1.08 \pm 0.26$.
-Questions both models fail lose $1.26 \pm 0.90$ points.
+Questions both models fail lose $1.26 \pm 0.90$ points on average over training.
 Selecting answers within a question gives no gain ($-0.27$ to $-0.01$ points).
 Between 77\% and 85\% of the variance in reverse KL lies between questions rather than between answers, which we believe explains why the question is the level that matters.
 \end{abstract}
@@ -101,7 +101,7 @@ Every rule is compared against standard on-policy distillation, which trains on 
 Our findings are:
 \begin{enumerate}
 \item \textbf{The variance lies between questions, and question-level selection is what helps.} Between 77\% and 85\% of the variance in reverse KL lies between questions. Selecting questions the teacher solves and the student fails ($+1.22 \pm 0.31$), questions with high reverse KL ($+1.09 \pm 0.84$), or questions with high student entropy from a single answer ($+1.08 \pm 0.26$) improves over standard on-policy distillation. Questions both models solve also help ($+0.91 \pm 0.16$), so the gain does not come only from student mistakes.
-\item \textbf{Questions both models fail hurt.} Training on them loses $1.26 \pm 0.90$ points against standard on-policy distillation.
+\item \textbf{Questions both models fail do worse.} Averaged over training, they lose $1.26 \pm 0.90$ points against standard on-policy distillation; at the final checkpoint the gap is smaller and noisier ($-0.48 \pm 1.98$).
 \item \textbf{Answer-level selection does not help.} Keeping the answers with the highest, middle or lowest reverse KL, or the most uncertain answers, changes accuracy by $-0.27$ to $-0.01$ points. The intermediate band did not help at either level.
 \end{enumerate}
 % src: experiments/p2b-analysis/three_seeds_meansd.txt; experiments/p2b-analysis/variance_all.txt
@@ -183,7 +183,7 @@ Correctness & n/a & 120 questions from one bucket (all 4 answers): teacher right
 Standard OPD & 4 of 12 answers at random & n/a \\
 \bottomrule
 \end{tabular}
-\caption{Selection rules. Every rule trains on 480 answers per refresh. Keeping 4 of 12 answers at random is equivalent to sampling 4 answers per question, so it is standard on-policy distillation (OPD) at the same budget.}
+\caption{Selection rules. Every rule trains on 480 answers per refresh. Keeping 4 of 12 answers at random is equivalent to sampling 4 answers per question, so it is standard on-policy distillation (OPD) at the same budget. For uncertainty at the question level we ran only the top third.}
 \label{tab:rules}
 % src: conf/experiment/p2b_{rollout,qkl,qent1,correct}.yaml; metrics.jsonl (R8)
 \end{table*}
@@ -209,8 +209,10 @@ We chose this pair because selection can only show an effect when the student ha
 \paragraph{Data.}
 Training questions come from a competition-math set derived from OpenThoughts \citep{guha2025openthoughts,zhao2026openthoughtsdata}.
 Questions are never reused, within a run or across seeds.
-In the labeled pool, about half of the questions are solved by neither model (Appendix~\ref{app:data}).
-% src: bank-8k/questions.jsonl bucket counts (R5): both_wrong 2,387 of 4,641
+All rules draw from the same pool of 4,641 questions that carry both student and teacher labels.
+These labels were collected to fill the correctness buckets, so the pool is not a uniform sample: it contains every sampled question the base student solves (19.7\% of the pool, against 6.3\% of all sampled questions) and none on which the student is mixed.
+About half of the pool is solved by neither model (Appendix~\ref{app:data}).
+% src: bank-8k/questions.jsonl bucket counts (R5): both_wrong 2,387 of 4,641; experiments/p2b-analysis/pool_composition.txt (student C 916 = 19.7% of pool vs 6.3% of 14,500; student M 0)
 
 \paragraph{Training.}
 We train with the GKD trainer in TRL \citep{vonwerra2020trl} at $\beta = 1$ and $\lambda = 0$, which is the on-policy reverse-KL objective above, for 60 steps with an effective batch of 32.
@@ -222,6 +224,39 @@ We evaluate on all 500 MATH-500 problems \citep{hendrycks2021math,lightman2023ve
 A sample is correct if Math-Verify \citep{kydlicek2025mathverify} accepts its boxed answer, and we report avg@4.
 The score of a rule in one seed is its mean accuracy over steps 15 to 60, and we report its difference to standard on-policy distillation in the same seed, as mean $\pm$ standard deviation over three training seeds.
 % src: runs/p2b-*/resolved_config.yaml eval (500 problems x 4 samples, 8192); experiments/p2b-analysis/three_seeds_meansd.txt
+
+\begin{table}[t!]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Rule} & \textbf{avg@4} & $\boldsymbol{\Delta}$\,\textbf{avg@4} & $\boldsymbol{\Delta}$\,\textbf{pass@4} \\
+\midrule
+Standard OPD & $42.58 \pm 0.37$ & & \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Question level}} \\
+T right, S wrong & $43.80 \pm 0.61$ & $+1.22 \pm 0.31$ & $+1.77 \pm 0.18$ \\
+Rev.\ KL high & $43.67 \pm 0.55$ & $+1.09 \pm 0.84$ & $+1.68 \pm 0.55$ \\
+Entropy high & $43.65 \pm 0.30$ & $+1.08 \pm 0.26$ & $+1.38 \pm 0.40$ \\
+Both right & $43.49 \pm 0.28$ & $+0.91 \pm 0.16$ & $+1.20 \pm 0.25$ \\
+Mixed & $42.85 \pm 0.40$ & $+0.28 \pm 0.18$ & $+1.18 \pm 0.50$ \\
+Rev.\ KL middle & $42.33 \pm 0.24$ & $-0.25 \pm 0.13$ & $+0.55 \pm 0.39$ \\
+Rev.\ KL low & $41.52 \pm 0.92$ & $-1.06 \pm 1.10$ & $-0.57 \pm 0.91$ \\
+Both wrong & $41.32 \pm 0.63$ & $-1.26 \pm 0.90$ & $-0.90 \pm 0.52$ \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Answer level}} \\
+Rev.\ KL high & $42.31 \pm 0.46$ & $-0.27 \pm 0.10$ & $+0.25 \pm 0.48$ \\
+Rev.\ KL middle & $42.57 \pm 0.31$ & $-0.01 \pm 0.47$ & $+0.48 \pm 0.19$ \\
+Rev.\ KL low & $42.45 \pm 0.77$ & $-0.13 \pm 0.49$ & $+0.43 \pm 0.64$ \\
+Entropy high & $42.45 \pm 0.17$ & $-0.13 \pm 0.20$ & $+0.25 \pm 0.40$ \\
+\bottomrule
+\end{tabular}}
+\caption{MATH-500 at an 8,192-token budget, averaged over steps 15 to 60, as mean $\pm$ SD over three seeds. $\Delta$ is the difference in points to standard OPD in the same seed (OPD pass@4: $54.47 \pm 0.25$). Question-level entropy is scored from one answer. T: teacher; S: student. Per-seed and final-checkpoint values are in Appendix~\ref{app:seeds}.}
+\label{tab:main}
+% src: experiments/p2b-analysis/three_seeds_meansd.txt (exact Decimal, round half away from zero, sample SD n=3); pass@4: experiments/p2b-analysis/pass4_step60_meansd.txt
+\end{table}
 
 %=====================================================================
 \section{Results}
@@ -239,37 +274,7 @@ Table~\ref{tab:main} and Figure~\ref{fig:forest} compare every rule against it, 
 \end{figure*}
 % src: experiments/p2b-analysis/three_seeds_meansd.txt
 
-\begin{table}[t]
-\centering
-\small
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}lrr@{}}
-\toprule
-\textbf{Rule} & \textbf{Accuracy (\%)} & $\boldsymbol{\Delta}$ \textbf{vs.\ OPD} \\
-\midrule
-Standard OPD (random) & $42.58 \pm 0.37$ & \\
-\midrule
-\multicolumn{3}{@{}l}{\emph{Question level}} \\
-T right, S wrong & $43.80 \pm 0.61$ & $+1.22 \pm 0.31$ \\
-Reverse KL high & $43.67 \pm 0.55$ & $+1.09 \pm 0.84$ \\
-Entropy high (1 answer) & $43.65 \pm 0.30$ & $+1.08 \pm 0.26$ \\
-Both right & $43.49 \pm 0.28$ & $+0.91 \pm 0.16$ \\
-Mixed & $42.85 \pm 0.40$ & $+0.28 \pm 0.18$ \\
-Reverse KL middle & $42.33 \pm 0.24$ & $-0.25 \pm 0.13$ \\
-Reverse KL low & $41.52 \pm 0.92$ & $-1.06 \pm 1.10$ \\
-Both wrong & $41.32 \pm 0.63$ & $-1.26 \pm 0.90$ \\
-\midrule
-\multicolumn{3}{@{}l}{\emph{Answer level}} \\
-Reverse KL high & $42.31 \pm 0.46$ & $-0.27 \pm 0.10$ \\
-Reverse KL middle & $42.57 \pm 0.31$ & $-0.01 \pm 0.47$ \\
-Reverse KL low & $42.45 \pm 0.77$ & $-0.13 \pm 0.49$ \\
-Entropy high & $42.45 \pm 0.17$ & $-0.13 \pm 0.20$ \\
-\bottomrule
-\end{tabular}
-\caption{MATH-500 avg@4 at an 8,192-token budget, averaged over steps 15 to 60, as mean $\pm$ SD over three seeds. $\Delta$ is the difference in points to standard OPD in the same seed. T: teacher; S: student. Per-seed values are in Appendix~\ref{app:seeds}.}
-\label{tab:main}
-% src: experiments/p2b-analysis/three_seeds_meansd.txt (exact Decimal, round half away from zero, sample SD n=3)
-\end{table}
+
 
 \subsection{Selecting questions helps}
 \label{sec:questions}
@@ -278,7 +283,8 @@ Entropy high & $42.45 \pm 0.17$ & $-0.13 \pm 0.20$ \\
 Questions the teacher solves and the student fails give the largest gain, $+1.22 \pm 0.31$ points.
 Questions both models solve also help, $+0.91 \pm 0.16$, so the value of a question does not come only from correcting student mistakes.
 Mixed questions give a small gain ($+0.28 \pm 0.18$).
-Questions that neither model solves lose $1.26 \pm 0.90$ points, the worst of all rules, so filtering them out should help standard on-policy distillation.
+Questions that neither model solves lose $1.26 \pm 0.90$ points on average over training, the worst of all rules; at the final checkpoint the gap shrinks to $-0.48 \pm 1.98$ (Appendix~\ref{app:final}).
+About half of the labeled questions are of this kind, so removing them is a natural filter, but we did not test that filter directly.
 % src: experiments/p2b-analysis/three_seeds_meansd.txt
 
 \paragraph{Reverse KL.}
@@ -292,6 +298,11 @@ Both the high and the low third vary strongly across seeds.
 Questions where a single sampled answer has high mean token entropy gain $+1.08 \pm 0.26$ points, the same as high reverse KL with a third of its seed-to-seed spread.
 This rule needs no teacher pass to score a question.
 % src: experiments/p2b-analysis/three_seeds_meansd.txt (0.26 vs 0.84)
+
+\paragraph{Coverage.}
+pass@4 shows the same ranking with smaller spread across seeds: teacher right and student wrong $+1.77 \pm 0.18$, high reverse KL $+1.68 \pm 0.55$ and high entropy $+1.38 \pm 0.40$, against $-0.90 \pm 0.52$ for questions both models fail (Table~\ref{tab:main}).
+So the question-level gains in avg@4 do not come at the cost of fewer problems solved at least once.
+% src: experiments/p2b-analysis/pass4_step60_meansd.txt
 
 \begin{figure}[t]
 \centering
@@ -307,6 +318,7 @@ This rule needs no teacher pass to score a question.
 No answer-level rule improves over standard on-policy distillation: the means lie between $-0.27$ and $-0.01$ points (Table~\ref{tab:main}).
 The middle reverse-KL band is at $-0.01 \pm 0.47$, so the intermediate band did not help at either level.
 Keeping the most uncertain answers, the classic active-learning rule, gives $-0.13 \pm 0.20$.
+In pass@4, the answer-level rules are between $+0.25$ and $+0.48$ points, also well below the question-level rules.
 The contrast with Section~\ref{sec:questions} is direct: high reverse KL helps when it selects questions ($+1.09$) but not when it selects answers ($-0.27$).
 % src: experiments/p2b-analysis/three_seeds_meansd.txt
 
@@ -340,7 +352,7 @@ The student's own uncertainty on one answer thus finds mostly the questions on w
 
 We asked what makes a rollout worth correcting in on-policy distillation.
 In our setting, the answer is the question, not the individual answer.
-Selecting questions the teacher solves and the student fails, questions with high reverse KL, or questions with high student entropy improves over standard on-policy distillation by about one point, and questions neither model solves reduce accuracy.
+Selecting questions the teacher solves and the student fails, questions with high reverse KL, or questions with high student entropy improves over standard on-policy distillation by about one point, and questions neither model solves reduce accuracy over training.
 Selecting answers within a question, by reverse KL or by entropy, does not help, and neither does an intermediate band of disagreement.
 Most of the variance in both scores lies between questions, which we believe explains the split.
 
@@ -486,13 +498,50 @@ Standard OPD accuracy (\%) & $42.51$ & $42.25$ & $42.97$ \\
 % src: experiments/p2b-analysis/three_seeds_exact.txt; three_seeds.txt (random means 42.51/42.25/42.97)
 \end{table}
 
+\paragraph{Final checkpoint.}
+\label{app:final}
+Table~\ref{tab:final} reports accuracy at step 60 alone. The question-level gains hold, with larger spread than the average over training; the both-wrong rule is below standard on-policy distillation on average but within one seed-to-seed standard deviation of it.
+
+\begin{table}[H]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Rule} & \textbf{avg@4 at step 60 (\%)} & $\boldsymbol{\Delta}$ \textbf{vs.\ OPD} \\
+\midrule
+Standard OPD & $42.70 \pm 0.93$ & \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Question level}} \\
+T right, S wrong & $44.47 \pm 0.42$ & $+1.77 \pm 0.68$ \\
+Rev.\ KL high & $44.13 \pm 0.52$ & $+1.43 \pm 1.32$ \\
+Entropy high & $44.15 \pm 0.10$ & $+1.45 \pm 0.84$ \\
+Both right & $44.35 \pm 0.17$ & $+1.65 \pm 0.97$ \\
+Mixed & $43.02 \pm 0.73$ & $+0.32 \pm 0.25$ \\
+Rev.\ KL middle & $42.80 \pm 0.44$ & $+0.10 \pm 0.69$ \\
+Rev.\ KL low & $42.12 \pm 1.53$ & $-0.58 \pm 2.18$ \\
+Both wrong & $42.22 \pm 1.17$ & $-0.48 \pm 1.98$ \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Answer level}} \\
+Rev.\ KL high & $42.42 \pm 0.43$ & $-0.28 \pm 0.85$ \\
+Rev.\ KL middle & $42.78 \pm 0.41$ & $+0.08 \pm 1.33$ \\
+Rev.\ KL low & $42.83 \pm 0.83$ & $+0.13 \pm 0.96$ \\
+Entropy high & $42.72 \pm 0.86$ & $+0.02 \pm 0.92$ \\
+\bottomrule
+\end{tabular}
+\caption{MATH-500 avg@4 at the final checkpoint (step 60), mean $\pm$ SD over three seeds; $\Delta$ is the difference to standard OPD in the same seed.}
+\label{tab:final}
+% src: experiments/p2b-analysis/pass4_step60_meansd.txt (step-60 columns)
+\end{table}
+
 \section{Data and Correctness Labels}
 \label{app:data}
 
 Questions come from the OpenThoughts-derived math set of \citet{zhao2026openthoughtsdata}.
 The pool used by standard on-policy distillation and the reverse-KL and entropy rules in all seeds, and by the correctness rules in seed 1, has 4,641 questions with both student and teacher labels: 2,387 are solved by neither model, 971 by the teacher only, 866 by both, and 417 are mixed.
+These 4,641 questions come from 14,500 sampled questions, all labeled by the student (13,023 failed, 916 solved, 561 mixed); the teacher labeled the questions needed to fill each correctness bucket, which covered all 916 solved questions, 3,725 failed ones and no mixed ones.
 For the correctness rules in seeds 2 and 3 we labeled further questions in the same way, so that every seed trains on new questions.
 The mixed bucket also contains questions that received a student label but no teacher label.
-% src: bank-8k/questions.jsonl (R5); verifier report outputs/active-on-policy-distillation-verification.md (bank-8k-w for seeds 2-3; mixed includes teacher-unlabeled)
+% src: bank-8k/questions.jsonl (R5); experiments/p2b-analysis/pool_composition.txt; verifier report outputs/active-on-policy-distillation-verification.md (bank-8k-w for seeds 2-3; mixed includes teacher-unlabeled)
 
 \end{document}
