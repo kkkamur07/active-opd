@@ -34,6 +34,7 @@
 % Added for this paper
 \usepackage{booktabs}
 \usepackage{float}
+\setlength{\emergencystretch}{1.5em}
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{xcolor}
@@ -126,7 +127,7 @@ Recent papers disagree on which data on-policy distillation should use.
 \citet{wang2026beyondprompt} find that targeted prompt selection does not consistently beat uniform random sampling.
 In our setting, questions that neither model solves do worse than standard on-policy distillation, while questions the teacher solves help, whether or not the student does.
 
-\paragraph{Active learning and data selection.}
+\paragraph{Active learning.}
 Active learning picks the examples a model should be trained on, often by uncertainty \citep{settles2009active}.
 \citet{kung2023active} apply this idea to instruction tuning by selecting tasks through prompt uncertainty, and \citet{mindermann2022rholoss} select points that are learnable, worth learning and not yet learned.
 \citet{xia2024random} report that for supervised fine-tuning on large data pools, random selection is hard to beat.
@@ -201,13 +202,13 @@ Standard OPD & 4 of 12 answers at random & n/a \\
 \label{sec:setup}
 
 \paragraph{Models.}
-The student is Qwen3.5-2B \citep{qwen2026qwen35_2b} and the teacher Qwen3.5-9B \citep{qwen2026qwen35_9b}, both in thinking mode.
+The student is Qwen3.5-2B and the teacher is Qwen3.5-9B, both in thinking mode \citep{qwen2026qwen35_2b,qwen2026qwen35_9b}.
 At an 8,192-token budget, the untrained student scores 26.87\% on MATH-500 and the teacher 61.15\%.
 We chose this pair because selection can only show an effect when the student has much to learn from the teacher, and here the gap is 34.28 points.
 % src: experiments/p2b-analysis/three_seeds_meansd.txt (base 26.87 = mean of 26.50/27.10/27.00); todo.md kl50_teacher 0.6115; 61.15-26.87=34.28
 
 \paragraph{Data.}
-Training questions come from a competition-math set derived from OpenThoughts \citep{guha2025openthoughts,zhao2026openthoughtsdata}.
+We train on competition math problems from the set of \citet{zhao2026openthoughtsdata}, which is derived from OpenThoughts \citep{guha2025openthoughts}.
 Questions are never reused, within a run or across seeds.
 All rules draw from the same pool of 4,641 questions that carry both student and teacher labels.
 These labels were collected to fill the correctness buckets, so the pool is not a uniform sample: it contains every sampled question the base student solves (19.7\% of the pool, against 6.3\% of all sampled questions) and none on which the student is mixed.
@@ -386,7 +387,7 @@ All rules share the configuration below; only the selection step differs (Table~
 \begin{table}[H]
 \centering
 \small
-\begin{tabular}{@{}p{2.6cm}p{4.4cm}@{}}
+\begin{tabular}{@{}P{2.6cm}P{4.4cm}@{}}
 \toprule
 \textbf{Setting} & \textbf{Value} \\
 \midrule
@@ -398,7 +399,7 @@ Refreshes & 4, every 15 steps \\
 Answers per refresh & 480 (one epoch) \\
 Effective batch size & 32 \\
 Batch composition & 8 per device $\times$ 2 accumulation $\times$ 2 GPUs \\
-Optimizer & AdamW, state kept across refreshes \\
+Optimizer & AdamW (state kept across refreshes) \\
 Peak learning rate & $3.16 \times 10^{-6}$ \\
 Schedule & 3 warmup steps, cosine decay to $0.1 \times$ peak \\
 Weight decay & 0 \\
