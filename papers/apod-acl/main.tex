@@ -33,6 +33,7 @@
 
 % Added for this paper
 \usepackage{booktabs}
+\usepackage{float}
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{xcolor}
@@ -363,35 +364,41 @@ Our result on unsolvable questions differs from reports that such questions are 
 %=====================================================================
 \appendix
 
-\section{Training Configuration}
+\section{Training and Evaluation Details}
 \label{app:config}
 
-\begin{table}[h]
+All rules share the configuration below; only the selection step differs (Table~\ref{tab:rules}).
+
+\subsection{Training}
+
+\begin{table}[H]
 \centering
 \small
-\begin{tabular}{@{}p{2.55cm}p{4.65cm}@{}}
+\begin{tabular}{@{}p{2.6cm}p{4.4cm}@{}}
 \toprule
-Student / teacher & Qwen3.5-2B / Qwen3.5-9B (thinking mode) \\
-Objective & TRL GKD, $\beta = 1$, $\lambda = 0$ (reverse KL) \\
-Training steps & 60 (4 refreshes $\times$ 15 steps) \\
-Answers trained per refresh & 480 \\
-Effective batch size & 32 (8 per device $\times$ 2 accum.\ $\times$ 2 GPUs) \\
-Peak learning rate & $3.1623 \times 10^{-6}$ \\
-Schedule & 3 warmup steps, cosine to $0.1 \times$ peak \\
-Optimizer state & kept across refreshes \\
-Precision & bf16 \\
-Sampling & temperature 1.0, top-$p$ 0.95, top-$k$ 20 \\
-Max.\ answer length & 8,192 tokens (training and evaluation) \\
-Generation & vLLM \citep{kwon2023vllm} \\
-Evaluation & MATH-500, 4 samples, steps 0/15/30/45/60 \\
-Grading & Math-Verify, boxed answer required \\
-Seeds & 3 (42, 1042, 2042), disjoint questions \\
-Hardware & 2 $\times$ NVIDIA A100 80GB \\
+\textbf{Setting} & \textbf{Value} \\
+\midrule
+Student & Qwen3.5-2B, thinking mode \\
+Teacher (frozen) & Qwen3.5-9B, thinking mode \\
+Objective & TRL GKD, $\beta = 1$, $\lambda = 0$ (on-policy reverse KL) \\
+Training steps & 60 \\
+Refreshes & 4, every 15 steps \\
+Answers per refresh & 480 (one epoch) \\
+Effective batch size & 32 \\
+Batch composition & 8 per device $\times$ 2 accumulation $\times$ 2 GPUs \\
+Optimizer & AdamW, state kept across refreshes \\
+Peak learning rate & $3.16 \times 10^{-6}$ \\
+Schedule & 3 warmup steps, cosine decay to $0.1 \times$ peak \\
+Weight decay & 0 \\
+Gradient clipping & 1.0 \\
+Precision & bf16 (student and teacher) \\
+Max.\ length & 16,384 tokens \\
+Memory & gradient checkpointing, Liger kernel \\
 \bottomrule
 \end{tabular}
-\caption{Training and evaluation configuration, shared by all rules.}
+\caption{Training configuration.}
 \label{tab:config}
-% src: runs/p2b-rollout-s1/resolved_config.yaml (R7); queue job scripts seeds 42/1042/2042 with question_offset 0/1440/2880; VM a2-ultragpu-2g
+% src: runs/p2b-rollout-s1/resolved_config.yaml (train.*, driver.steps_total/refresh_every); apod/stages/train.py (AdamW)
 \end{table}
 
 \paragraph{Learning rate.}
@@ -399,16 +406,61 @@ We searched up to ten peak learning rates between $10^{-6}$ and $7.6 \times 10^{
 A finer grid over $[10^{-6}, 10^{-5}]$ on the middle reverse-KL rule then selected $3.16 \times 10^{-6}$, the lowest rate within 2\% of the best loss, which we use for every rule.
 % src: runs/kl50w/lr_sweep.db (best lr per study: kl_high, kl_mid, kl_low, random all 5e-06); runs/kl50w/lr_refine.json (chosen 3.1623e-06; 5.6234e-06 within 2%)
 
+\subsection{Generation}
+Training answers and evaluation samples use the same settings: temperature 1.0, top-$p$ 0.95, top-$k$ 20, no presence penalty, and at most 8,192 new tokens, with thinking mode enabled and generation in vLLM \citep{kwon2023vllm}.
+Every question, in training and evaluation, is followed by the instruction ``Please reason step by step, and put your final answer within \texttt{\textbackslash boxed\{\}}.''
+% src: runs/p2b-rollout-s1/resolved_config.yaml (sampling.*, model.enable_thinking); apod/datasets/load.py BOXED; pool/eval_problems.jsonl, pool/prompts.jsonl
+
+\subsection{Scoring and selection}
+Reverse KL is computed exactly over the full vocabulary, with the teacher reading every token of the student's answer.
+Student entropy is computed from the student's own next-token distributions.
+Both scores are recomputed at every refresh with the current student.
+Answer-level rules draw 120 questions with 12 answers each; question-level reverse-KL and entropy rules draw 360 questions with 4 answers each; correctness rules draw 120 questions with 4 answers each from one bucket.
+Correctness labels are computed once before training from 4 student and 4 teacher answers per question at the same sampling settings; a model solves a question if at least 3 answers are correct and fails it if at most 1 is.
+% src: runs/p2b-*/resolved_config.yaml (driver.kl_estimator: exact; rollout.*; bank.correct_min 3, wrong_max 1, num_rollouts 4); conf/experiment/p2b_*.yaml
+
+\subsection{Evaluation}
+We evaluate on all 500 problems of MATH-500 with 4 samples each, after every refresh (steps 0, 15, 30, 45 and 60).
+A sample is correct if it contains a boxed answer that Math-Verify accepts as equal to the reference.
+For problem $j$ with samples $\hat{y}_{j,1},\dots,\hat{y}_{j,4}$, we report
+\begin{equation}
+\text{avg@4} = \frac{1}{500} \sum_{j=1}^{500} \frac{1}{4} \sum_{k=1}^{4} \mathbb{1}\big[\hat{y}_{j,k} \text{ correct}\big].
+\end{equation}
+The score of a rule in one seed is its mean avg@4 over steps 15, 30, 45 and 60; Table~\ref{tab:main} reports the mean and sample standard deviation of this score, and of its difference to standard on-policy distillation in the same seed, over the three seeds.
+% src: runs/p2b-*/resolved_config.yaml (eval.num_problems 500, num_samples 4, max_new_tokens 8192); apod/stages/rollout_eval.py (correct and has_boxed); experiments/p2b-analysis/three_seeds_meansd.txt
+
+\subsection{Compute}
+All runs use two NVIDIA A100 80GB GPUs.
+Table~\ref{tab:cost} gives the median time per refresh.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Stage (min)} & \textbf{1,440 ans.} & \textbf{480 ans.} \\
+\midrule
+Generation and evaluation & 22.1 & 15.2 \\
+Student entropy & 3.7 & 1.3 \\
+Teacher reverse KL & 14.9 & 4.9 \\
+Training (15 steps) & 10.9 & 10.2 \\
+\bottomrule
+\end{tabular}
+\caption{Median minutes per refresh in seed 1. Left: answer-level and question-level reverse-KL and entropy rules (1,440 answers sampled). Right: correctness rules (480 answers sampled).}
+\label{tab:cost}
+% src: runs/p2b-{rollout,correct}-s1/metrics.jsonl wall_clock medians (n=20 / n=16): rollout_eval_s, entropy_s, oracle_s, train_s
+\end{table}
+
 \section{Per-Seed Results}
 \label{app:seeds}
 
-\begin{table}[h]
+\begin{table}[H]
 \centering
 \small
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{5pt}
 \begin{tabular}{@{}lrrr@{}}
 \toprule
-\textbf{Rule ($\Delta$ vs.\ OPD)} & \textbf{Seed 1} & \textbf{Seed 2} & \textbf{Seed 3} \\
+\textbf{Rule} & \textbf{Seed 1} & \textbf{Seed 2} & \textbf{Seed 3} \\
 \midrule
 \multicolumn{4}{@{}l}{\emph{Question level}} \\
 T right, S wrong & $+0.90$ & $+1.24$ & $+1.53$ \\
@@ -426,10 +478,10 @@ Reverse KL middle & $-0.30$ & $+0.53$ & $-0.26$ \\
 Reverse KL low & $+0.25$ & $-0.68$ & $+0.05$ \\
 Entropy high & $-0.06$ & $+0.04$ & $-0.35$ \\
 \midrule
-Standard OPD accuracy (\%) & 42.51 & 42.25 & 42.97 \\
+Standard OPD accuracy (\%) & $42.51$ & $42.25$ & $42.97$ \\
 \bottomrule
 \end{tabular}
-\caption{Difference to standard on-policy distillation in each seed (points of MATH-500 avg@4, mean over steps 15 to 60).}
+\caption{Difference to standard on-policy distillation in each seed, in points of MATH-500 avg@4 averaged over steps 15 to 60. The last row is the accuracy of standard on-policy distillation itself.}
 \label{tab:seeds}
 % src: experiments/p2b-analysis/three_seeds_exact.txt; three_seeds.txt (random means 42.51/42.25/42.97)
 \end{table}
