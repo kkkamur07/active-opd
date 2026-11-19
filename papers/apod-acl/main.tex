@@ -318,7 +318,7 @@ So the question-level gains in avg@4 do not come at the cost of fewer problems s
 No answer-level rule improves over standard on-policy distillation: the means lie between $-0.27$ and $-0.01$ points (Table~\ref{tab:main}).
 The middle reverse-KL band is at $-0.01 \pm 0.47$, so the intermediate band did not help at either level.
 Keeping the most uncertain answers, the classic active-learning rule, gives $-0.13 \pm 0.20$.
-In pass@4, the answer-level rules are between $+0.25$ and $+0.48$ points, also well below the question-level rules.
+In pass@4, the answer-level rules give $+0.25 \pm 0.48$ (reverse KL high), $+0.48 \pm 0.19$ (middle), $+0.43 \pm 0.64$ (low) and $+0.25 \pm 0.40$ (entropy high), all well below the question-level rules.
 The contrast with Section~\ref{sec:questions} is direct: high reverse KL helps when it selects questions ($+1.09$) but not when it selects answers ($-0.27$).
 % src: experiments/p2b-analysis/three_seeds_meansd.txt
 
