@@ -57,29 +57,40 @@ ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2)
 save(fig, 3)
 print("saved figs 1-3")
 
-# fig4 (plot A): MATH-500 strict avg@4 vs. training step, mean ± SD over 3 seeds.
-# data: experiments/p2b-analysis/curves_3seeds.json (exported from runs/p2b-*/metrics.jsonl, steps 0/15/30/45/60)
+# fig4 (plot A, redesigned after figures4papers/figure_VIGIL/plot_posttraining.py): gain over standard OPD at each
+# evaluation step, mean over 3 seeds. Baseline = dashed line at 0; lines with left-to-right alpha ramp + markers; no bands
+# (SDs are in Table 2). data: experiments/p2b-analysis/curves_3seeds.json (from runs/p2b-*/metrics.jsonl).
 import json
+from matplotlib.collections import LineCollection
+from matplotlib.colors import to_rgba
+from matplotlib.lines import Line2D
 C = json.load(open("experiments/p2b-analysis/curves_3seeds.json"))
-STEPS = [15, 30, 45, 60]
-def ms(arm):
-    v = np.array([[C[arm][s][str(t)] for t in STEPS] for s in ("1", "2", "3")])
-    return v.mean(0), v.std(0, ddof=1)
-panels = [("Choosing questions", [("t_right_s_wrong", "T right, S wrong", P["blue_main"]), ("qkl_high", "Rev. KL high", P["teal"]),
-                                  ("qent1_high", "Entropy high (1 answer)", "#9A4D8E"), ("both_wrong", "Both wrong", "#8BCF8B")]),
-          ("Choosing answers", [("kl_high", "Rev. KL high", P["blue_main"]), ("kl_mid", "Rev. KL middle", P["teal"]),
-                                ("kl_low", "Rev. KL low", "#9A4D8E"), ("ent_top4", "Entropy high", "#8BCF8B")])]
-fig, axs = plt.subplots(1, 2, figsize=(6.5, 2.5), sharey=True)
+STEPS = [0, 15, 30, 45, 60]
+def gain(arm):
+    return np.array([np.mean([C[arm][s][str(t)] - C["random"][s][str(t)] for s in ("1", "2", "3")]) for t in STEPS])
+def ramp_line(ax, xp, y, color, lw=1.8):
+    pts = np.column_stack([xp, y]); seg = np.stack([pts[:-1], pts[1:]], axis=1)
+    rgb = to_rgba(color); al = np.linspace(0.35, 0.95, len(seg))
+    ax.add_collection(LineCollection(seg, colors=[(*rgb[:3], a) for a in al], linewidths=lw, capstyle="round"))
+    ax.plot(xp, y, lw=0, marker="o", ms=4.2, color=color)
+panels = [("Choosing questions", [("t_right_s_wrong", "T right, S wrong", P["blue_main"]),
+                                  ("qent1_high", "Entropy high (1 answer)", "#8BCF8B"),
+                                  ("qkl_high", "Reverse KL high", P["teal"]),
+                                  ("both_wrong", "Both wrong", P["red_strong"])]),
+          ("Choosing answers", [("kl_high", "Reverse KL high", P["blue_main"]), ("kl_mid", "Reverse KL middle", P["teal"]),
+                                ("kl_low", "Reverse KL low", "#9A4D8E"), ("ent_top4", "Entropy high", "#8BCF8B")])]
+fig, axs = plt.subplots(1, 2, figsize=(6.5, 2.75), sharey=True)
+xp = np.arange(len(STEPS))
 for ax, (title, arms) in zip(axs, panels):
-    m, sd = ms("random")
-    ax.plot(STEPS, m, color=P["red_strong"], ls="--", lw=1.6, marker="o", ms=3, label="Standard OPD")
-    ax.fill_between(STEPS, m - sd, m + sd, color=P["red_strong"], alpha=0.12, lw=0)
+    ax.axhline(0, color="black", alpha=0.35, lw=1.6, ls="--")
+    hs = [Line2D([0], [0], color="black", alpha=0.35, lw=1.6, ls="--", label="Standard OPD")]
     for arm, lab, col in arms:
-        m, sd = ms(arm)
-        ax.plot(STEPS, m, color=col, lw=1.5, marker="o", ms=3, label=lab)
-        ax.fill_between(STEPS, m - sd, m + sd, color=col, alpha=0.12, lw=0)
-    ax.set_title(title, fontsize=8.5, fontweight="bold"); ax.set_xticks(STEPS); ax.set_xlabel("Training step")
-    ax.set_ylim(39, 47); ax.legend(loc="lower right", fontsize=6.5, handlelength=1.6)
-axs[0].set_ylabel("MATH-500 avg@4 (%)")
+        ramp_line(ax, xp, gain(arm), col)
+        hs.append(Line2D([0], [0], color=col, lw=1.8, marker="o", ms=4.2, label=lab))
+    ax.set_xticks(xp, [str(t) for t in STEPS]); ax.set_xlim(-0.25, len(STEPS) - 0.75)
+    ax.set_xlabel("Training step"); ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.set_ylim(-2.4, 2.4); ax.set_yticks([-2, -1, 0, 1, 2])
+    ax.legend(handles=hs, loc="upper center", bbox_to_anchor=(0.5, -0.24), ncol=2, fontsize=7, handlelength=2.2, columnspacing=1.0)
+axs[0].set_ylabel("Gain over standard OPD\n(MATH-500 avg@4, points)")
 save(fig, 4)
-print("saved fig4")
+print("fig4 gains:", {a: [round(v, 2) for v in gain(a)] for _, arms in panels for a, _, _ in arms})

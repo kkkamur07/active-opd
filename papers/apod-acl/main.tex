@@ -228,12 +228,12 @@ The score of a rule in one seed is its mean accuracy over steps 15 to 60, and we
 \label{sec:results}
 
 Standard on-policy distillation raises the student from 26.87\% to $42.58 \pm 0.37$\% (mean over steps 15 to 60).
-Table~\ref{tab:main} and Figure~\ref{fig:forest} compare every rule against it, and Figure~\ref{fig:curves} shows accuracy over training.
+Table~\ref{tab:main} and Figure~\ref{fig:forest} compare every rule against it, and Figure~\ref{fig:curves} shows the gain at each evaluation step.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/aopd_fig4.pdf}
-\caption{MATH-500 avg@4 over training, mean (line) $\pm$ SD (band) over three seeds, evaluated after every refresh. All rules start from the untrained student (26.87\%, not shown). Left: question-level rules stay above standard on-policy distillation (dashed) at every evaluation, and the both-wrong rule stays below it. Right: answer-level rules overlap standard on-policy distillation throughout.}
+\caption{Gain over standard on-policy distillation at each evaluation step, in points of MATH-500 avg@4 (mean over three seeds; standard deviations are in Table~\ref{tab:main}). Standard on-policy distillation is the dashed line at 0. All rules start from the same untrained student; the small offsets at step 0 come from separate evaluations of that model. Left: the question-level rules are above standard on-policy distillation at every later step, and the both-wrong rule is below it. Right: the answer-level rules stay within 0.8 points of it.}
 \label{fig:curves}
 % src: experiments/p2b-analysis/curves_3seeds.json (from runs/p2b-*/metrics.jsonl); script papers/active-on-policy-distillation_fig.py (fig4)
 \end{figure*}
