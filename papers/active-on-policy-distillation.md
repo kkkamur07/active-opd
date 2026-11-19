@@ -1,3 +1,4 @@
+<!-- SUPERSEDED 2026-11-19 by papers/apod-acl/main.tex (ACL LaTeX, mean ± SD, reverse-KL naming, appendix). Kept for history; do not edit. -->
 # What Makes a Rollout Worth Correcting? Active On-Policy Distillation for Mathematical Reasoning
 
 ## Abstract
