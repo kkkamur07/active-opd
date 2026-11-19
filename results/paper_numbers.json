@@ -1,0 +1,847 @@
+{
+ "base_avg4": 26.87,
+ "mean_over_steps_15_60": {
+  "random": {
+   "avg4": {
+    "mean": 42.58,
+    "sd": 0.37
+   },
+   "pass4": {
+    "mean": 54.47,
+    "sd": 0.25
+   }
+  },
+  "kl_high": {
+   "avg4": {
+    "mean": 42.31,
+    "sd": 0.46
+   },
+   "avg4_delta": {
+    "mean": -0.27,
+    "sd": 0.1
+   },
+   "avg4_delta_per_seed": [
+    -0.34,
+    -0.33,
+    -0.15
+   ],
+   "pass4": {
+    "mean": 54.72,
+    "sd": 0.66
+   },
+   "pass4_delta": {
+    "mean": 0.25,
+    "sd": 0.48
+   },
+   "pass4_delta_per_seed": [
+    0.5,
+    -0.3,
+    0.55
+   ]
+  },
+  "kl_mid": {
+   "avg4": {
+    "mean": 42.57,
+    "sd": 0.31
+   },
+   "avg4_delta": {
+    "mean": -0.01,
+    "sd": 0.47
+   },
+   "avg4_delta_per_seed": [
+    -0.3,
+    0.53,
+    -0.26
+   ],
+   "pass4": {
+    "mean": 54.95,
+    "sd": 0.23
+   },
+   "pass4_delta": {
+    "mean": 0.48,
+    "sd": 0.19
+   },
+   "pass4_delta_per_seed": [
+    0.35,
+    0.7,
+    0.4
+   ]
+  },
+  "kl_low": {
+   "avg4": {
+    "mean": 42.45,
+    "sd": 0.77
+   },
+   "avg4_delta": {
+    "mean": -0.13,
+    "sd": 0.49
+   },
+   "avg4_delta_per_seed": [
+    0.25,
+    -0.68,
+    0.05
+   ],
+   "pass4": {
+    "mean": 54.9,
+    "sd": 0.84
+   },
+   "pass4_delta": {
+    "mean": 0.43,
+    "sd": 0.64
+   },
+   "pass4_delta_per_seed": [
+    0.7,
+    -0.3,
+    0.9
+   ]
+  },
+  "ent_top4": {
+   "avg4": {
+    "mean": 42.45,
+    "sd": 0.17
+   },
+   "avg4_delta": {
+    "mean": -0.13,
+    "sd": 0.2
+   },
+   "avg4_delta_per_seed": [
+    -0.06,
+    0.04,
+    -0.35
+   ],
+   "pass4": {
+    "mean": 54.72,
+    "sd": 0.64
+   },
+   "pass4_delta": {
+    "mean": 0.25,
+    "sd": 0.4
+   },
+   "pass4_delta_per_seed": [
+    -0.05,
+    0.1,
+    0.7
+   ]
+  },
+  "qkl_high": {
+   "avg4": {
+    "mean": 43.67,
+    "sd": 0.55
+   },
+   "avg4_delta": {
+    "mean": 1.09,
+    "sd": 0.84
+   },
+   "avg4_delta_per_seed": [
+    1.69,
+    1.45,
+    0.13
+   ],
+   "pass4": {
+    "mean": 56.15,
+    "sd": 0.36
+   },
+   "pass4_delta": {
+    "mean": 1.68,
+    "sd": 0.55
+   },
+   "pass4_delta_per_seed": [
+    2.2,
+    1.75,
+    1.1
+   ]
+  },
+  "qkl_mid": {
+   "avg4": {
+    "mean": 42.33,
+    "sd": 0.24
+   },
+   "avg4_delta": {
+    "mean": -0.25,
+    "sd": 0.13
+   },
+   "avg4_delta_per_seed": [
+    -0.18,
+    -0.16,
+    -0.4
+   ],
+   "pass4": {
+    "mean": 55.02,
+    "sd": 0.35
+   },
+   "pass4_delta": {
+    "mean": 0.55,
+    "sd": 0.39
+   },
+   "pass4_delta_per_seed": [
+    1.0,
+    0.35,
+    0.3
+   ]
+  },
+  "qkl_low": {
+   "avg4": {
+    "mean": 41.52,
+    "sd": 0.92
+   },
+   "avg4_delta": {
+    "mean": -1.06,
+    "sd": 1.1
+   },
+   "avg4_delta_per_seed": [
+    -1.93,
+    0.18,
+    -1.43
+   ],
+   "pass4": {
+    "mean": 53.9,
+    "sd": 1.0
+   },
+   "pass4_delta": {
+    "mean": -0.57,
+    "sd": 0.91
+   },
+   "pass4_delta_per_seed": [
+    -1.6,
+    0.1,
+    -0.2
+   ]
+  },
+  "qent1_high": {
+   "avg4": {
+    "mean": 43.65,
+    "sd": 0.3
+   },
+   "avg4_delta": {
+    "mean": 1.08,
+    "sd": 0.26
+   },
+   "avg4_delta_per_seed": [
+    1.34,
+    1.06,
+    0.83
+   ],
+   "pass4": {
+    "mean": 55.85,
+    "sd": 0.22
+   },
+   "pass4_delta": {
+    "mean": 1.38,
+    "sd": 0.4
+   },
+   "pass4_delta_per_seed": [
+    1.75,
+    1.45,
+    0.95
+   ]
+  },
+  "t_right_s_wrong": {
+   "avg4": {
+    "mean": 43.8,
+    "sd": 0.61
+   },
+   "avg4_delta": {
+    "mean": 1.22,
+    "sd": 0.31
+   },
+   "avg4_delta_per_seed": [
+    0.9,
+    1.24,
+    1.53
+   ],
+   "pass4": {
+    "mean": 56.23,
+    "sd": 0.41
+   },
+   "pass4_delta": {
+    "mean": 1.77,
+    "sd": 0.18
+   },
+   "pass4_delta_per_seed": [
+    1.6,
+    1.75,
+    1.95
+   ]
+  },
+  "both_right": {
+   "avg4": {
+    "mean": 43.49,
+    "sd": 0.28
+   },
+   "avg4_delta": {
+    "mean": 0.91,
+    "sd": 0.16
+   },
+   "avg4_delta_per_seed": [
+    0.8,
+    1.1,
+    0.84
+   ],
+   "pass4": {
+    "mean": 55.67,
+    "sd": 0.1
+   },
+   "pass4_delta": {
+    "mean": 1.2,
+    "sd": 0.25
+   },
+   "pass4_delta_per_seed": [
+    1.2,
+    1.45,
+    0.95
+   ]
+  },
+  "mixed": {
+   "avg4": {
+    "mean": 42.85,
+    "sd": 0.4
+   },
+   "avg4_delta": {
+    "mean": 0.28,
+    "sd": 0.18
+   },
+   "avg4_delta_per_seed": [
+    0.08,
+    0.41,
+    0.34
+   ],
+   "pass4": {
+    "mean": 55.65,
+    "sd": 0.56
+   },
+   "pass4_delta": {
+    "mean": 1.18,
+    "sd": 0.5
+   },
+   "pass4_delta_per_seed": [
+    0.65,
+    1.65,
+    1.25
+   ]
+  },
+  "both_wrong": {
+   "avg4": {
+    "mean": 41.32,
+    "sd": 0.63
+   },
+   "avg4_delta": {
+    "mean": -1.26,
+    "sd": 0.9
+   },
+   "avg4_delta_per_seed": [
+    -1.71,
+    -0.23,
+    -1.85
+   ],
+   "pass4": {
+    "mean": 53.57,
+    "sd": 0.28
+   },
+   "pass4_delta": {
+    "mean": -0.9,
+    "sd": 0.52
+   },
+   "pass4_delta_per_seed": [
+    -0.65,
+    -0.55,
+    -1.5
+   ]
+  }
+ },
+ "final_checkpoint_step_60": {
+  "random": {
+   "avg4": {
+    "mean": 42.7,
+    "sd": 0.93
+   },
+   "pass4": {
+    "mean": 54.67,
+    "sd": 0.23
+   }
+  },
+  "kl_high": {
+   "avg4": {
+    "mean": 42.42,
+    "sd": 0.43
+   },
+   "avg4_delta": {
+    "mean": -0.28,
+    "sd": 0.85
+   },
+   "avg4_delta_per_seed": [
+    -0.85,
+    0.7,
+    -0.7
+   ],
+   "pass4": {
+    "mean": 55.53,
+    "sd": 0.5
+   },
+   "pass4_delta": {
+    "mean": 0.87,
+    "sd": 0.58
+   },
+   "pass4_delta_per_seed": [
+    1.2,
+    0.2,
+    1.2
+   ]
+  },
+  "kl_mid": {
+   "avg4": {
+    "mean": 42.78,
+    "sd": 0.41
+   },
+   "avg4_delta": {
+    "mean": 0.08,
+    "sd": 1.33
+   },
+   "avg4_delta_per_seed": [
+    -0.25,
+    1.55,
+    -1.05
+   ],
+   "pass4": {
+    "mean": 55.13,
+    "sd": 0.5
+   },
+   "pass4_delta": {
+    "mean": 0.47,
+    "sd": 0.31
+   },
+   "pass4_delta_per_seed": [
+    0.2,
+    0.8,
+    0.4
+   ]
+  },
+  "kl_low": {
+   "avg4": {
+    "mean": 42.83,
+    "sd": 0.83
+   },
+   "avg4_delta": {
+    "mean": 0.13,
+    "sd": 0.96
+   },
+   "avg4_delta_per_seed": [
+    0.9,
+    0.45,
+    -0.95
+   ],
+   "pass4": {
+    "mean": 55.13,
+    "sd": 0.31
+   },
+   "pass4_delta": {
+    "mean": 0.47,
+    "sd": 0.5
+   },
+   "pass4_delta_per_seed": [
+    1.0,
+    0.4,
+    0.0
+   ]
+  },
+  "ent_top4": {
+   "avg4": {
+    "mean": 42.72,
+    "sd": 0.86
+   },
+   "avg4_delta": {
+    "mean": 0.02,
+    "sd": 0.92
+   },
+   "avg4_delta_per_seed": [
+    0.8,
+    0.25,
+    -1.0
+   ],
+   "pass4": {
+    "mean": 55.4,
+    "sd": 0.72
+   },
+   "pass4_delta": {
+    "mean": 0.73,
+    "sd": 0.58
+   },
+   "pass4_delta_per_seed": [
+    0.4,
+    0.4,
+    1.4
+   ]
+  },
+  "qkl_high": {
+   "avg4": {
+    "mean": 44.13,
+    "sd": 0.52
+   },
+   "avg4_delta": {
+    "mean": 1.43,
+    "sd": 1.32
+   },
+   "avg4_delta_per_seed": [
+    1.7,
+    2.6,
+    0.0
+   ],
+   "pass4": {
+    "mean": 56.67,
+    "sd": 0.23
+   },
+   "pass4_delta": {
+    "mean": 2.0,
+    "sd": 0.4
+   },
+   "pass4_delta_per_seed": [
+    2.4,
+    2.0,
+    1.6
+   ]
+  },
+  "qkl_mid": {
+   "avg4": {
+    "mean": 42.8,
+    "sd": 0.44
+   },
+   "avg4_delta": {
+    "mean": 0.1,
+    "sd": 0.69
+   },
+   "avg4_delta_per_seed": [
+    -0.35,
+    0.9,
+    -0.25
+   ],
+   "pass4": {
+    "mean": 55.93,
+    "sd": 0.99
+   },
+   "pass4_delta": {
+    "mean": 1.27,
+    "sd": 0.76
+   },
+   "pass4_delta_per_seed": [
+    0.4,
+    1.6,
+    1.8
+   ]
+  },
+  "qkl_low": {
+   "avg4": {
+    "mean": 42.12,
+    "sd": 1.53
+   },
+   "avg4_delta": {
+    "mean": -0.58,
+    "sd": 2.18
+   },
+   "avg4_delta_per_seed": [
+    -2.35,
+    1.85,
+    -1.25
+   ],
+   "pass4": {
+    "mean": 54.4,
+    "sd": 1.22
+   },
+   "pass4_delta": {
+    "mean": -0.27,
+    "sd": 0.99
+   },
+   "pass4_delta_per_seed": [
+    -1.4,
+    0.4,
+    0.2
+   ]
+  },
+  "qent1_high": {
+   "avg4": {
+    "mean": 44.15,
+    "sd": 0.1
+   },
+   "avg4_delta": {
+    "mean": 1.45,
+    "sd": 0.84
+   },
+   "avg4_delta_per_seed": [
+    1.3,
+    2.35,
+    0.7
+   ],
+   "pass4": {
+    "mean": 56.67,
+    "sd": 0.61
+   },
+   "pass4_delta": {
+    "mean": 2.0,
+    "sd": 0.8
+   },
+   "pass4_delta_per_seed": [
+    2.8,
+    2.0,
+    1.2
+   ]
+  },
+  "t_right_s_wrong": {
+   "avg4": {
+    "mean": 44.47,
+    "sd": 0.42
+   },
+   "avg4_delta": {
+    "mean": 1.77,
+    "sd": 0.68
+   },
+   "avg4_delta_per_seed": [
+    1.35,
+    2.55,
+    1.4
+   ],
+   "pass4": {
+    "mean": 56.4,
+    "sd": 0.35
+   },
+   "pass4_delta": {
+    "mean": 1.73,
+    "sd": 0.31
+   },
+   "pass4_delta_per_seed": [
+    1.8,
+    1.4,
+    2.0
+   ]
+  },
+  "both_right": {
+   "avg4": {
+    "mean": 44.35,
+    "sd": 0.17
+   },
+   "avg4_delta": {
+    "mean": 1.65,
+    "sd": 0.97
+   },
+   "avg4_delta_per_seed": [
+    1.3,
+    2.75,
+    0.9
+   ],
+   "pass4": {
+    "mean": 56.4,
+    "sd": 0.4
+   },
+   "pass4_delta": {
+    "mean": 1.73,
+    "sd": 0.23
+   },
+   "pass4_delta_per_seed": [
+    1.6,
+    1.6,
+    2.0
+   ]
+  },
+  "mixed": {
+   "avg4": {
+    "mean": 43.02,
+    "sd": 0.73
+   },
+   "avg4_delta": {
+    "mean": 0.32,
+    "sd": 0.25
+   },
+   "avg4_delta_per_seed": [
+    0.15,
+    0.6,
+    0.2
+   ],
+   "pass4": {
+    "mean": 55.13,
+    "sd": 1.01
+   },
+   "pass4_delta": {
+    "mean": 0.47,
+    "sd": 1.01
+   },
+   "pass4_delta_per_seed": [
+    0.6,
+    -0.6,
+    1.4
+   ]
+  },
+  "both_wrong": {
+   "avg4": {
+    "mean": 42.22,
+    "sd": 1.17
+   },
+   "avg4_delta": {
+    "mean": -0.48,
+    "sd": 1.98
+   },
+   "avg4_delta_per_seed": [
+    -1.65,
+    1.8,
+    -1.6
+   ],
+   "pass4": {
+    "mean": 54.53,
+    "sd": 1.53
+   },
+   "pass4_delta": {
+    "mean": -0.13,
+    "sd": 1.36
+   },
+   "pass4_delta_per_seed": [
+    -1.2,
+    1.4,
+    -0.6
+   ]
+  }
+ },
+ "gain_per_step": {
+  "steps": [
+   0,
+   15,
+   30,
+   45,
+   60
+  ],
+  "kl_high": [
+   0.0,
+   0.53,
+   -0.78,
+   -0.55,
+   -0.28
+  ],
+  "kl_mid": [
+   0.0,
+   0.4,
+   0.23,
+   -0.77,
+   0.08
+  ],
+  "kl_low": [
+   0.0,
+   -0.25,
+   -0.52,
+   0.13,
+   0.13
+  ],
+  "ent_top4": [
+   0.0,
+   -0.25,
+   0.15,
+   -0.42,
+   0.02
+  ],
+  "qkl_high": [
+   -0.1,
+   0.7,
+   0.85,
+   1.37,
+   1.43
+  ],
+  "qkl_mid": [
+   -0.1,
+   0.2,
+   -0.5,
+   -0.78,
+   0.1
+  ],
+  "qkl_low": [
+   -0.1,
+   -1.23,
+   -1.43,
+   -0.98,
+   -0.58
+  ],
+  "qent1_high": [
+   -0.1,
+   0.85,
+   1.18,
+   0.82,
+   1.45
+  ],
+  "t_right_s_wrong": [
+   0.0,
+   0.62,
+   1.25,
+   1.25,
+   1.77
+  ],
+  "both_right": [
+   0.0,
+   -0.2,
+   1.1,
+   1.1,
+   1.65
+  ],
+  "mixed": [
+   0.0,
+   -0.77,
+   0.75,
+   0.8,
+   0.32
+  ],
+  "both_wrong": [
+   0.0,
+   -1.07,
+   -1.5,
+   -2.0,
+   -0.48
+  ]
+ },
+ "variance_between_questions_pct": {
+  "reverse_kl": [
+   84.59,
+   85.15,
+   80.03,
+   82.05,
+   85.19,
+   83.43,
+   81.55,
+   81.59,
+   82.11,
+   77.15,
+   83.76,
+   80.67
+  ],
+  "entropy": [
+   85.81,
+   82.9,
+   75.56,
+   77.01,
+   87.18,
+   82.4,
+   78.35,
+   79.03,
+   84.0,
+   73.44,
+   82.55,
+   78.15
+  ]
+ },
+ "entropy_vs_kl_top_third_overlap": [
+  97,
+  93,
+  90,
+  95,
+  102,
+  92,
+  96,
+  97,
+  96,
+  99,
+  89,
+  66
+ ],
+ "training_pool": {
+  "pool_C": 916,
+  "pool_W": 3725,
+  "pool_bucket_both_right": 866,
+  "pool_bucket_both_wrong": 2387,
+  "pool_bucket_mixed": 417,
+  "pool_bucket_teacher_right_student_wrong": 971,
+  "sampled_C": 916,
+  "sampled_M": 561,
+  "sampled_W": 13023
+ }
+}

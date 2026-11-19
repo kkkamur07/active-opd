@@ -9,24 +9,24 @@ for every run except the 4B runs in Section 4.
 
 ---
 
-## 1. Final program (reported in the paper, `papers/apod-acl/main.tex`)
+## 1. Final program (reported in the paper, `paper/main.tex`)
 
 Shared setup: 60 training steps, 4 refreshes of 15 steps, 480 answers trained per refresh, LR 3.1623e-6 (3 warmup steps,
 cosine to 0.1x), effective batch 32, bf16, 8,192-token cap, MATH-500 (500 x 4) after every refresh (steps 0/15/30/45/60).
-Configs: `conf/experiment/p2b_*.yaml`. Seeds: 42 / 1042 / 2042 with disjoint questions (question offset 0 / 1440 / 2880;
+Configs: `conf/experiment/{answer_level,question_kl,question_entropy,correctness}.yaml`; reproduce with `experiments/run_final_program.sh`. Seeds: 42 / 1042 / 2042 with disjoint questions (question offset 0 / 1440 / 2880;
 correctness seeds 2-3 exclude earlier seeds' questions). Hardware: 2x A100 80GB (seed 3 of most groups on a second VM).
 
 | Run directories | Rules (arms) | Level | Status |
 |---|---|---|---|
-| `p2b-rollout-s{1,2,3}` | `random` (standard OPD), `kl_high`, `kl_mid`, `kl_low`, `ent_top4` | answer (120 q x 12, keep 4/q) | complete, 3 seeds |
-| `p2b-qkl-s{1,2,3}` | `qkl_high`, `qkl_mid`, `qkl_low` | question (360 q x 4, keep 120 q), reverse KL | complete, 3 seeds |
-| `p2b-qent1-s{1,2,3}` | `qent1_high` | question, student entropy of ONE answer | complete, 3 seeds |
-| `p2b-qent-s{1,2,3}` | `qent_high`, `qent_mid`, `qent_low` | question, mean entropy of 4 answers | complete, 3 seeds; NOT in the paper (author decision: report the single-answer rule only) |
-| `p2b-correct-s{1,2,3}` | `t_right_s_wrong`, `both_right`, `mixed`, `both_wrong` | question, correctness bucket (120 q x 4) | complete, 3 seeds |
-| `p2b-{rollout,qkl,correct}-s1/terminal_eval` | held-out evaluation (otval200: 200 unseen OpenThoughts questions x 4) of every seed-1 checkpoint | | complete, seed 1 only; not in the paper |
+| `answer-level-s{1,2,3}` (ran as `p2b-rollout-s*`) | `random` (standard OPD), `kl_high`, `kl_mid`, `kl_low`, `ent_top4` | answer (120 q x 12, keep 4/q) | complete, 3 seeds |
+| `question-kl-s{1,2,3}` (ran as `p2b-qkl-s*`) | `qkl_high`, `qkl_mid`, `qkl_low` | question (360 q x 4, keep 120 q), reverse KL | complete, 3 seeds |
+| `question-entropy-s{1,2,3}` (ran as `p2b-qent1-s*`) | `qent1_high` | question, student entropy of ONE answer | complete, 3 seeds |
+| `p2b-qent-s{1,2,3}` (code at tag `v0-pilot`) | `qent_high`, `qent_mid`, `qent_low` | question, mean entropy of 4 answers | complete, 3 seeds; NOT in the paper (author decision: report the single-answer rule only) |
+| `correctness-s{1,2,3}` (ran as `p2b-correct-s*`) | `t_right_s_wrong`, `both_right`, `mixed`, `both_wrong` | question, correctness bucket (120 q x 4) | complete, 3 seeds |
+| `p2b-{rollout,qkl,correct}-s1/terminal_eval` (code at tag `v0-pilot`) | held-out evaluation (otval200: 200 unseen OpenThoughts questions x 4) of every seed-1 checkpoint | | complete, seed 1 only; not in the paper |
 
-Main results (mean over steps 15-60, mean +- SD over 3 seeds; source `experiments/p2b-analysis/three_seeds_meansd.txt`,
-pass@4 `pass4_step60_meansd.txt`):
+Main results (mean over steps 15-60, mean +- SD over 3 seeds; source `results/paper_numbers.json`, made by
+`experiments/paper_numbers.py`):
 
 | Rule | avg@4 | Delta avg@4 vs OPD | Delta pass@4 vs OPD |
 |---|---|---|---|
@@ -44,10 +44,8 @@ pass@4 `pass4_step60_meansd.txt`):
 | Reverse KL low (answer) | 42.45 +- 0.77 | -0.13 +- 0.49 | +0.43 +- 0.64 |
 | Entropy high (answer) | 42.45 +- 0.17 | -0.13 +- 0.20 | +0.25 +- 0.40 |
 
-Supporting analyses (all in `experiments/p2b-analysis/`): between-question variance share (`variance_all.txt`),
-single-answer entropy vs reverse-KL question overlap (`qent1_overlap.txt`), final-checkpoint results
-(`pass4_step60_meansd.txt`), training-pool composition (`pool_composition.txt`), seed-1 held-out results (`otval_s1.txt`),
-per-step curves (`curves_3seeds.json`).
+Supporting analyses (all in `results/paper_numbers.json`): between-question variance share, single-answer entropy vs
+reverse-KL question overlap, final-checkpoint results, training-pool composition and per-step gains.
 
 ### Shared infrastructure for the final program
 
@@ -60,7 +58,7 @@ per-step curves (`curves_3seeds.json`).
 
 ---
 
-## 2. 2B pilot runs (before the final program; not in the paper)
+## 2. 2B pilot runs (before the final program; not in the paper; code at tag `v0-pilot`)
 
 These shaped the hypotheses. Their designs differ from the final program (constant LR 2e-5 with Adam reset per round, or
 100-step runs with 10-step refreshes), and most have one seed.
@@ -81,7 +79,7 @@ These shaped the hypotheses. Their designs differ from the final program (consta
 
 ---
 
-## 3. Abandoned 4B program (not in the paper)
+## 3. Abandoned 4B program (not in the paper; code at tag `v0-pilot`)
 
 The program was first designed for a Qwen3.5-4B student and switched to the 2B because the 4B left too little room below
 the teacher at 8k (57.15 vs 61.15).
@@ -109,4 +107,6 @@ removed; the 4-answer entropy rule is run but unreported.
 - Everything including checkpoints (650 GB): GCP project `krrish-active-learning`, boot disk of `instance-20260813-175138`
   (us-central1-a) and snapshot `apod-results-20261118`.
 - Per-step training logs: W&B project `apod`.
-- Analysis scripts and derived tables: `experiments/p2b-analysis/`; job scripts: `experiments/p2b-jobs/`.
+- Analysis and reproduction: `experiments/paper_numbers.py`, `experiments/run_final_program.sh`; per-run metrics: `results/runs/`.
+- The final runs were executed under the names `p2b-rollout-s*`, `p2b-qkl-s*`, `p2b-qent1-s*` and `p2b-correct-s*`;
+  the current names are `answer-level-s*`, `question-kl-s*`, `question-entropy-s*` and `correctness-s*`.

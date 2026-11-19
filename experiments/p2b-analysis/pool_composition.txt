@@ -1,5 +1,0 @@
-bank-8k: all 14,500 student-labeled questions, student label distribution: {'W': 13023, 'C': 916, 'M': 561} n 14500
-teacher-labeled pool (4,641, used by every rule except correctness s2/s3): {'W': 3725, 'C': 916} n 4641
-  student W: 89.8% of all swept vs 80.3% of the labeled pool
-  student M: 3.9% of all swept vs 0.0% of the labeled pool
-  student C: 6.3% of all swept vs 19.7% of the labeled pool

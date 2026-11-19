@@ -1,110 +1,78 @@
 # Active On-Policy Distillation
 
-Student `Qwen/Qwen3.5-2B`, frozen teacher `Qwen/Qwen3.5-9B`, OpenThoughts math, Math-Verify.
-
-Qwen did not publish MATH-500 for these small models. Official thinking-mode scores:
-
-| Benchmark | 2B student | 9B teacher | Gap |
-| --- | ---: | ---: | ---: |
-| HMMT Feb 25 | 22.9 | 83.2 | +60.3 |
-| HMMT Nov 25 | 19.6 | 82.9 | +63.3 |
-| PolyMATH | 26.1 | 57.3 | +31.2 |
-| GPQA for 2B, GPQA Diamond for 9B | 51.6 | 81.7 | +30.1 |
-
-The model cards use different labels for the last row, so do not read it as a strict
-like-for-like comparison without checking the benchmark definitions.
-
-## The experiment
-
-Which student trajectories are worth the teacher's attention? Each **arm** is a
-selection policy; each **round** of an arm is one turn of the loop, run from the
-arm's current checkpoint (the base student at round 0):
-
-1. **Eval**: MATH-500, 4 samples per problem, strict `avg@4` (a response
-   without `\boxed{}` is incorrect) with `pass@4` as the diversity monitor
-   (ADR 0003). Reported through `scripts/eval_table.py`, never from the
-   stage's console counts.
-2. **Rollouts**: 12 student trajectories per prompt for the round's prompt
-   slice (128 prompts per round in the Hydra config, 136 in the kl50 runs),
-   capped at 8192 new tokens; cap-hit trajectories stay eligible for training
-   and grade incorrect (ADR 0002). Same vLLM engine session as the eval.
-3. **Scoring**: exact per-trajectory reverse KL `KL(pi_S || pi_T)` over the
-   full vocabulary for all 12 rollouts, plus forward KL, both models' mean
-   token entropy and the top-16 overlap statistics (`scripts/oracle_kl.py`).
-4. **Selection**: per prompt keep 4 of 12 -- the reverse-KL tertile the arm
-   names (`kl_high` ranks 1-4, `kl_mid` 5-8, `kl_low` 9-12) or a seeded
-   `random` 4; the random arm is not scored after the shared round 0.
-5. **Train**: one GKD pass (TRL `GKDTrainer`, `beta=1`, `lmbda=0`: pure
-   reverse KL on the provided trajectories) over the 512-544 selected rows at
-   effective batch 32, DDP across both GPUs, writing the next checkpoint.
-
-Round 0 is shared across arms (identical base policy: one eval, one rollout
-pool, one scoring pass, partitioned four ways). A final eval-only round measures
-the last checkpoint. Full contract and file schemas: [docs/pipeline.md](docs/pipeline.md);
-the vocabulary is in [CONTEXT.md](CONTEXT.md).
-
-Sampling everywhere is `temperature=1.0, top_p=0.95, top_k=20`, no presence
-penalty (ADR 0004): generation, scoring and the training objective share one
-distribution.
-
-vLLM generates and Hugging Face scores and trains. vLLM has no autograd and
-cannot train; it is a rollout engine. The two run as separate processes: an
-engine reserves 90-95% of the card for its KV cache, so the HF models will not
-fit beside it.
-
-## Setup
-
-Machine setup, version choices, dataset limits, and rollout findings are in
-[docs/guide.md](docs/guide.md).
-
-```bash
-uv sync --extra vllm --extra train
-```
-
-The environment must use the cu130 torch build selected by vLLM 0.26.0. The
-reason and the CUDA troubleshooting steps are in [docs/guide.md](docs/guide.md#cuda-troubleshooting).
-
-## Running
-
-Two drivers, both resumable from on-disk markers:
-
-```bash
-# KL-bucket experiment (current): kl_high / kl_mid / kl_low / random.
-uv run python scripts/bucket_experiment.py --kl50w     # 8192 cap, 3 rounds, LR cycles + persisted Adam state
-uv run python scripts/bucket_experiment.py --report    # per-round table (scripts/eval_table.py)
-
-# Entropy-selection design (entropy_top4 / random_top4 / all), Hydra-configured from conf/.
-uv run python -m apod.main +experiment=smoke
-uv run python -m apod.main
-```
-
-One process per GPU inside every stage; work is sharded by
-`example_index % num_shards == shard`, each shard writes its own
-`*.shard{k}.jsonl`, and the token npz files are keyed by example index, so
-shards share one directory and nothing merges by hand. Stages are plain
-scripts that read `<run_dir>/resolved_config.yaml`, so they can be launched by
-hand for a single (arm, round, shard).
-
-Logits are never materialised in full: the vocab is ~248k, so a 16k-token
-float32 logit tensor is ~16 GB. Entropy and KL scoring run the decoder once and
-apply the lm_head in position slices; training uses Liger's chunked fused JSD.
-
-Measured stage costs and the ranked list of remaining throughput levers are in
-[docs/perf_review.md](docs/perf_review.md).
+Code, configurations and results for *What Makes a Rollout Worth Correcting? Active On-Policy
+Distillation for Mathematical Reasoning*. A Qwen3.5-2B student learns from a frozen Qwen3.5-9B
+teacher on its own answers (on-policy distillation, reverse KL); a selection rule decides which
+questions and answers receive the teacher's correction.
 
 ## Layout
 
 ```
-apod/
-  main.py         Hydra driver (arms x rounds, resume, metrics.jsonl)
-  stages/         rollout_eval.py (vLLM eval + rollouts), entropy.py, train.py (GKD)
-  selection.py    entropy_top4 / random_top4 / all
-  datasets/       load.py, io.py
-  models/         load.py, generate_vllm.py, vllm_qwen35.py, presence_penalty.py (dormant, ADR 0004)
-  verification/   verify.py (Math-Verify grading)
-scripts/          bucket_experiment.py (KL-bucket driver), oracle_kl.py (scoring), lr_sweep.py,
-                  lr_probe.py, eval_table.py, kl_drift.py, tb_export.py, check_run.py,
-                  rollout_report.py, token_lengths.py, verify_*.py
-conf/             Hydra config tree (model, data, rollout, sampling, engine, eval, selection, train)
-docs/             pipeline.md, guide.md, perf_review.md, smoke_report.md, code_critique.md, adr/
+apod/                     library
+  pipeline.py             training loop: sample -> score -> select -> train, every 15 steps
+  selection.py            selection rules (answer level and question level)
+  question_bank.py        correctness labels (4 student + 4 teacher answers per question)
+  grading.py              answer checking (Math-Verify, boxed answer required)
+  data/                   datasets and JSONL I/O
+  models/                 vLLM and Hugging Face model loading
+  stages/                 GPU stages run as subprocesses:
+    generate.py           answers + MATH-500 evaluation (vLLM)
+    entropy.py            student token entropy
+    teacher_kl.py         exact per-token reverse KL to the teacher
+    train.py              on-policy distillation step (TRL GKD, beta=1, lambda=0)
+  dry_run.py              CPU stand-ins for the GPU stages (tests, plan checks)
+conf/                     Hydra configs; experiment/ holds the four experiments of the paper
+experiments/
+  run_final_program.sh    reproduces the question bank and all 12 runs
+  paper_numbers.py        recomputes every number in the paper from the runs
+results/
+  runs/*/metrics.jsonl    per-run metrics of the 12 runs (enough for every table)
+  paper_numbers.json      all numbers used by the paper
+paper/                    LaTeX source, bibliography, figures and make_figures.py
+tests/                    unit, end-to-end (dry run) and golden (paper numbers) tests
+EXPERIMENTS.md            record of every run
 ```
+
+## Setup
+
+```bash
+uv sync --extra train        # Python 3.12, CUDA 13 wheels (torch 2.11, vLLM 0.26, TRL 1.10)
+uv pip install pytest
+```
+
+## Reproduce
+
+```bash
+bash experiments/run_final_program.sh                      # 2 x 80 GB GPUs; resumable
+python experiments/paper_numbers.py --runs-dir outputs/runs --full
+python paper/make_figures.py
+cd paper && tectonic main.tex
+```
+
+Rebuilding the tables only needs the committed metrics:
+`python experiments/paper_numbers.py --runs-dir results/runs --out /tmp/numbers.json`.
+
+## One experiment
+
+```bash
+python -m apod.pipeline +experiment=question_entropy                       # real run
+python -m apod.pipeline +experiment=question_entropy driver.dry_run=true \
+    output_dir=/tmp/plan tracking.mode=disabled                            # CPU plan check
+```
+
+Experiments: `answer_level` (standard OPD and answer-level rules), `question_kl`,
+`question_entropy`, `correctness`. Every run resumes where it stopped.
+
+## Tests
+
+```bash
+CUDA_VISIBLE_DEVICES= python -m pytest -q -p no:anyio tests
+```
+
+`tests/test_paper_numbers.py` checks that every mean ± SD and per-seed value in `paper/main.tex`
+equals what `experiments/paper_numbers.py` computes from `results/runs/`.
+
+## Earlier experiments
+
+Pilot runs and an abandoned 4B program preceded the final program (see `EXPERIMENTS.md`).
+Their code and configurations are preserved at the git tag `v0-pilot`.
