@@ -181,7 +181,7 @@ Uncertainty & the 4 answers with the highest mean token entropy & top third of q
 \addlinespace
 Correctness & n/a & 120 questions from one bucket (all 4 answers): teacher right and student wrong, both right, mixed, both wrong \\
 \addlinespace
-Standard OPD & 4 of 12 answers at random & n/a \\
+Standard OPD (baseline) & \multicolumn{2}{p{\dimexpr\textwidth*4/7\relax}}{4 answers per question chosen at random; the single baseline for every rule at both levels} \\
 \bottomrule
 \end{tabular}
 \caption{Selection rules. Every rule trains on 480 answers per refresh. Keeping 4 of 12 answers at random is equivalent to sampling 4 answers per question, so it is standard on-policy distillation (OPD) at the same budget. For uncertainty at the question level we ran only the top third.}
@@ -367,7 +367,6 @@ Our result on unsolvable questions differs from reports that such questions are 
 \begin{enumerate}
 \item \textbf{Cost of correctness labels.} The correctness rules need four student and four teacher answers for every candidate question before training, which is expensive at long reasoning budgets. The labels come from the base student and are not updated as it trains.
 \item \textbf{Scope.} We study one student-teacher pair (Qwen3.5-2B and Qwen3.5-9B), one training set, one 8,192-token budget and MATH-500. Whether the results transfer to other model families, larger students and other benchmarks is open.
-\item \textbf{Seeds and effect size.} The gains are about one point and we use three seeds. Some rules vary strongly across seeds (reverse KL high: $\pm 0.84$; reverse KL low: $\pm 1.10$).
 \item \textbf{Filtering not run directly.} We trained on the both-wrong bucket, but did not run standard on-policy distillation with those questions removed, so the gain from filtering them out is inferred.
 \end{enumerate}
 % src: experiments/p2b-analysis/three_seeds_meansd.txt
